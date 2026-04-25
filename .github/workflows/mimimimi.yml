@@ -1,48 +1,50 @@
-name: Beeee Yooo
+name: Baaall
 
 on:
-  workflow_dispatch:
-  push:
-    branches: [ "main" ]
+  schedule:
+    - cron: "0 */6 * * *"        # هر ۶ ساعت
+  workflow_dispatch:            # اجرای دستی
+
+# اضافه کردن این بخش برای رفع ارور Node 20 (طبق تصویر گیت‌هاب)
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    timeout-minutes: 360
 
     steps:
-      - name: Checkout repository
+      - name: دریافت کد از مخزن
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: نصب پایتون
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      - name: Install System Dependencies (Audio & Video)
+      - name: نصب ابزارهای صوتی و تصویری
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg pulseaudio
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg pulseaudio
 
-      - name: Install Python dependencies
+      - name: نصب کتابخونه‌های پایتون
         run: |
-          python -m pip install --upgrade pip
-          pip install requests playwright beautifulsoup4 playwright-stealth
+          pip install requests beautifulsoup4 playwright playwright-stealth
 
-      - name: Install Playwright Browsers & Dependencies
+      - name: نصب مرورگرهای Playwright
         run: |
-          # نسخه ۲۲ هم به کروم و هم به فایرفاکس نیاز دارد
-          python -m playwright install chromium firefox
-          python -m playwright install-deps chromium firefox
+          playwright install chromium firefox
+          playwright install-deps chromium firefox
 
-      - name: Run bot with Virtual Audio Setup
+      - name: اجرای ربات (۳۵۵ دقیقه) به همراه کارت صدای مجازی
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
         run: |
-          # راه‌اندازی سرور صدای مجازی دقیقاً با نام virtual_out (مطابق خط 559 فایل Bot22.py)
+          # راه‌اندازی کارت صدای مجازی برای نسخه ۲۲
           pulseaudio --start --exit-idle-time=-1
           pactl load-module module-null-sink sink_name=virtual_out
           pactl set-default-sink virtual_out
           
-          # اجرای ربات
-          python Bot.py
+          # اجرای ربات با محدودیت زمانی ۲۱۳۰۰ ثانیه (۳۵۵ دقیقه)
+          timeout 21300 python Bot.py
