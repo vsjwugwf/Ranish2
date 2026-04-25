@@ -1,5 +1,4 @@
-name: Bot23 Phoenix Runner
-
+name: Bommm
 on:
   schedule:
     - cron: "0 */6 * * *"        # هر ۶ ساعت یک‌بار
@@ -9,6 +8,8 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 360         # حداکثر ۶ ساعت
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # رفع هشدار Node.js 20
 
     steps:
       - name: دریافت کد از مخزن
@@ -19,36 +20,17 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: نصب پیش‌نیازهای صوتی و تصویری
+      - name: نصب پیش‌نیازها (فقط Xvfb و FFmpeg)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq xvfb pulseaudio pulseaudio-utils ffmpeg
-
-      - name: راه‌اندازی نمایشگر و صدای مجازی
-        run: |
-          # نمایشگر مجازی Xvfb
-          Xvfb :99 -screen 0 1920x1080x24 &
-          echo "DISPLAY=:99" >> $GITHUB_ENV
-          # صدای مجازی PulseAudio با loopback
-          pulseaudio -D --exit-idle-time=-1
-          sleep 1
-          pactl load-module module-null-sink sink_name=virtual_out
-          pactl load-module module-loopback source=virtual_out.monitor
-          pactl set-default-sink virtual_out
-          echo "PULSE_SERVER=unix:/run/user/$(id -u)/pulse/native" >> $GITHUB_ENV
-          echo "PULSE_SINK=virtual_out" >> $GITHUB_ENV
-
-      - name: نصب کتابخانه‌های پایتون
-        run: |
+          sudo apt-get install -y -qq xvfb ffmpeg
           pip install requests beautifulsoup4 playwright
           pip install playwright_stealth
 
-      - name: نصب مرورگرهای Playwright (کروم و فایرفاکس)
+      - name: نصب مرورگر کروم برای Playwright
         run: |
           playwright install chromium
-          playwright install firefox
           playwright install-deps chromium
-          playwright install-deps firefox
 
       - name: اجرای ربات (۳۵۵ دقیقه)
         env:
