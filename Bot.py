@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-شاهکار ربات بله – نسخهٔ ۲۳ (Phoenix)
-سیستم اشتراک انحصاری (بدون کانال)، ضبط صدا با فایرفاکس + PulseAudio loopback،
-کاوشگر تعاملی هوشمند، شات کامل، رابط کاربری یکپارچه، ضد اسپم.
+Bot23 Stable — بدون صدا، فقط کروم
+کاوشگر تعاملی، شات کامل، اشتراک دائمی، ضد اسپم.
 """
 
 import os, sys, json, time, math, queue, shutil, zipfile, uuid, re, hashlib
@@ -26,11 +25,13 @@ BALE_API_URL = "https://tapi.bale.ai/bot" + BALE_BOT_TOKEN
 REQUEST_TIMEOUT = 30
 LONG_POLL_TIMEOUT = 50
 ZIP_PART_SIZE = int(19 * 1024 * 1024)       # 19MB
-MAX_PARTS_PER_FILE = 50
 
-ADMIN_CHAT_ID = 46829437                     # شناسه ادمین
+ADMIN_CHAT_ID = 46829437
 
-# ═══════════════════════ سطوح اشتراک (پایه، نقره‌ای، طلایی، الماسی) ═══════════════════════
+# مسیر پشتیبان کدهای اشتراک
+CODES_BACKUP_FILE = "codes_backup.json"
+
+# ═══════════════════════ سطوح اشتراک ═══════════════════════
 PLAN_LIMITS = {
     "پایه": {
         "browser": (3, 3600, None),
@@ -90,7 +91,7 @@ PLAN_LIMITS = {
     },
 }
 
-# رزولوشن‌های مجاز برای ضبط ویدیو
+# رزولوشن‌های مجاز
 ALLOWED_RESOLUTIONS = {
     "480p":  (854, 480),
     "720p":  (1280, 720),
@@ -105,7 +106,7 @@ RES_REQUIREMENTS = {
 }
 MAX_4K_RECORD_MINUTES = 5
 
-# ═══════════════════════ قفل‌ها و ساخت‌های همزمان ═══════════════════════
+# ═══════════════════════ قفل‌های همزمانی ═══════════════════════
 print_lock = threading.Lock()
 queue_lock = threading.Lock()
 workers_lock = threading.Lock()
@@ -137,12 +138,11 @@ class UserSettings:
     browser_mode: str = "text"
     deep_scan_mode: str = "logical"
     record_behavior: str = "click"
-    audio_enabled: bool = False
+    audio_enabled: bool = False          # فعلاً غیرفعال
     video_format: str = "webm"
     incognito_mode: bool = False
     video_delivery: str = "split"
     video_resolution: str = "720p"
-    # برای کاوشگر تعاملی: هیچ تنظیمی لازم نیست (فعال‌سازی از منوها)
 
 @dataclass
 class SessionState:
@@ -163,7 +163,6 @@ class SessionState:
     found_downloads: Optional[List[Dict[str, str]]] = None
     found_downloads_page: int = 0
     last_settings_msg_id: Optional[str] = None
-    # برای کاوشگر تعاملی
     interactive_elements: Optional[List[Dict[str, Any]]] = None
 
 @dataclass
@@ -184,9 +183,9 @@ class WorkerInfo:
     worker_id: int
     current_job_id: Optional[str] = None
     status: str = "idle"
-    worker_type: str = "general"   # "general" یا "record"
+    worker_type: str = "general"   # همه کارها توسط general انجام می‌شه
 
-# ═══════════════════════ مدیریت اشتراک (تک‌نفره بدون کانال) ═══════════════════════
+# ═══════════════════════ مدیریت اشتراک (با پشتیبان‌گیری) ═══════════════════════
 SUBSCRIPTIONS_FILE = "subscriptions.json"
 SERVICE_DISABLED_FLAG = "service_disabled.flag"
 
@@ -218,45 +217,101 @@ def set_user_subscription(chat_id: int, level: str):
         save_subscriptions(data)
 
 def activate_subscription(chat_id: int, code: str) -> Optional[str]:
-    """کدهای اضافه‌شده توسط ادمین (بدون کانال). کد یک‌بار مصرف است و به اولین chat_id قفل می‌شود."""
     code = code.strip()
     data = load_subscriptions()
     codes = data.get("valid_codes", {})
-    if code not in codes:
-        return None
+    if code not in codes: return None
     info = codes[code]
-    # اگر کد VIP باشد (bound_chat_id مشخص)
     if "bound_chat_id" in info and info["bound_chat_id"] is not None:
         if str(chat_id) != str(info["bound_chat_id"]):
-            return None  # مخاطب غیرمجاز
-    # کد تک‌نفره: اولین استفاده قفل می‌شود
+            return None
     if "used_by" not in info or info["used_by"] is None:
         info["used_by"] = str(chat_id)
         save_subscriptions(data)
     else:
         if info["used_by"] != str(chat_id):
-            return None  # قبلاً شخص دیگری استفاده کرده
+            return None
     set_user_subscription(chat_id, info["plan"])
     return info["plan"]
+
+# ═══════════════════════ پشتیبان‌گیری از کدها (دائمی‌سازی) ═══════════════════════
+def git_push_backup():
+    try:
+        subprocess.run(["git", "config", "user.name", "Bot23"], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(["git", "config", "user.email", "bot@local"], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(["git", "add", CODES_BACKUP_FILE], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+        subprocess.run(["git", "commit", "-m", "Update codes backup"], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+        subprocess.run(["git", "push"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        debug_log("git push backup succeeded")
+    except Exception as e:
+        debug_log(f"git push backup failed: {e}")
+
+def load_codes_backup() -> Dict[str, Any]:
+    try:
+        with open(CODES_BACKUP_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except: return {}
+
+def save_codes_backup(data: Dict[str, Any]):
+    tmp = CODES_BACKUP_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, CODES_BACKUP_FILE)
+    threading.Thread(target=git_push_backup, daemon=True).start()
+
+def init_subscriptions_from_backup():
+    backup = load_codes_backup()
+    if not backup: return
+    data = load_subscriptions()
+    valid_codes = data.get("valid_codes", {})
+    for code, info in backup.items():
+        if code not in valid_codes:
+            valid_codes[code] = info
+    data["valid_codes"] = valid_codes
+    save_subscriptions(data)
+    debug_log(f"Loaded {len(backup)} codes from backup")
 
 def add_code(level: str, code: str, bound_chat_id: Optional[int] = None) -> bool:
     with subscriptions_lock:
         data = load_subscriptions()
         codes = data.setdefault("valid_codes", {})
         if code in codes: return False
-        codes[code] = {"plan": level, "bound_chat_id": bound_chat_id, "used_by": None}
+        new_entry = {"plan": level, "bound_chat_id": bound_chat_id, "used_by": None}
+        codes[code] = new_entry
         save_subscriptions(data)
-        return True
+
+    backup = load_codes_backup()
+    backup[code] = new_entry
+    save_codes_backup(backup)
+    debug_log(f"Code added: {code} (plan={level}, bound={bound_chat_id})")
+    return True
 
 def remove_code(code: str) -> bool:
     with subscriptions_lock:
         data = load_subscriptions()
         codes = data.get("valid_codes", {})
-        if code in codes:
-            del codes[code]
-            save_subscriptions(data)
-            return True
-        return False
+        if code not in codes: return False
+        del codes[code]
+        save_subscriptions(data)
+
+    backup = load_codes_backup()
+    if code in backup:
+        del backup[code]
+        save_codes_backup(backup)
+    debug_log(f"Code removed: {code}")
+    return True
+
+def handle_unsubscribe(chat_id):
+    session = get_session(chat_id)
+    if session.subscription == "پایه":
+        send_message(chat_id, "⚠️ شما هم‌اکنون در طرح پایه هستید.")
+        return
+    set_user_subscription(chat_id, "پایه")
+    session.subscription = "پایه"
+    session.is_admin = (chat_id == ADMIN_CHAT_ID)
+    set_session(session)
+    send_message(chat_id, "🔓 اشتراک شما لغو شد. اکنون در طرح **پایه** هستید.",
+                 reply_markup=main_menu_keyboard(session.is_admin))
 
 def is_service_disabled() -> bool:
     return os.path.exists(SERVICE_DISABLED_FLAG)
@@ -269,22 +324,20 @@ def toggle_service():
         with open(SERVICE_DISABLED_FLAG, "w") as f: f.write("disabled")
         return True
 
+# ═══════════════════════ Rate Limiter ═══════════════════════
 def check_rate_limit(chat_id: int, mode: str, file_size_bytes: Optional[int] = None) -> Optional[str]:
-    if chat_id == ADMIN_CHAT_ID:
-        return None
+    if chat_id == ADMIN_CHAT_ID: return None
     level = get_user_subscription(chat_id)
     limits = PLAN_LIMITS.get(level, PLAN_LIMITS["پایه"])
     mode_key = mode
     if mode in ("browser", "browser_click"): mode_key = "browser"
     limit = limits.get(mode_key)
-    if not limit:
-        return f"⛔ این قابلیت برای سطح «{level}» در دسترس نیست."
+    if not limit: return f"⛔ این قابلیت برای سطح «{level}» در دسترس نیست."
     max_count, window_seconds, max_size = limit
     if max_size is not None and file_size_bytes is not None and file_size_bytes > max_size:
         max_mb = max_size / (1024 * 1024)
         return f"📦 حجم فایل ({file_size_bytes/(1024*1024):.1f}MB) بیش از حد مجاز ({max_mb:.0f}MB) برای سطح «{level}» است."
-    if max_count >= 999:
-        return None
+    if max_count >= 999: return None
     now = time.time()
     data = load_subscriptions()
     key = str(chat_id)
@@ -311,8 +364,7 @@ FLOOD_MAX_CLICKS = 3
 BAN_DURATION = 900
 
 def check_flood(chat_id: int) -> bool:
-    if chat_id == ADMIN_CHAT_ID:
-        return True
+    if chat_id == ADMIN_CHAT_ID: return True
     now = time.time()
     with flood_lock:
         if chat_id in user_ban_until and now < user_ban_until[chat_id]:
@@ -327,16 +379,10 @@ def check_flood(chat_id: int) -> bool:
         return True
 
 def is_user_banned(chat_id: int) -> bool:
-    if chat_id == ADMIN_CHAT_ID:
-        return False
+    if chat_id == ADMIN_CHAT_ID: return False
     now = time.time()
     with flood_lock:
         return chat_id in user_ban_until and now < user_ban_until[chat_id]
-
-def reset_ban(chat_id: int):
-    with flood_lock:
-        user_ban_until.pop(chat_id, None)
-        user_flood_data.pop(chat_id, None)
 
 # ═══════════════════════ ذخیره‌سازی نشست‌ها ═══════════════════════
 SESSIONS_FILE = "sessions.json"
@@ -419,7 +465,7 @@ def get_updates(offset=None, timeout=LONG_POLL_TIMEOUT):
     if offset: params["offset"] = offset
     return bale_request("getUpdates", params=params) or []
 
-# ═══════════════════════ رابط کاربری ═══════════════════════
+# ═══════════════════════ منوها ═══════════════════════
 def main_menu_keyboard(is_admin=False):
     base = [
         [{"text": "🧭 مرورگر", "callback_data": "menu_browser"},
@@ -438,7 +484,7 @@ def settings_keyboard(settings: UserSettings, subscription: str):
     mode = {"text": "📄 متن", "media": "🎬 مدیا", "explorer": "🔍 جستجوگر"}[settings.browser_mode]
     deep = "🧠 منطقی" if settings.deep_scan_mode == "logical" else "🗑 همه چیز"
     rec_behavior = {"click": "🖱️ کلیک", "scroll": "📜 اسکرول", "live": "🎭 لایو"}[settings.record_behavior]
-    audio = "🔊 با صدا" if settings.audio_enabled else "🔇 بی‌صدا"
+    audio = "🔇 بی‌صدا"  # فعلاً صدا نداریم
     vfmt = settings.video_format.upper()
     incognito = "🕶️ ناشناس" if settings.incognito_mode else "👤 عادی"
     delivery = "ZIP 📦" if settings.video_delivery == "zip" else "تکه‌ای 🧩"
@@ -459,7 +505,7 @@ def settings_keyboard(settings: UserSettings, subscription: str):
     ]
     return {"inline_keyboard": kb}
 
-# ═══════════════════════ Playwright – کروم (عمومی) ═══════════════════════
+# ═══════════════════════ Playwright (فقط کروم) ═══════════════════════
 _global_playwright = None
 _global_browser = None
 browser_contexts = {}
@@ -470,8 +516,22 @@ try:
 except ImportError:
     HAS_STEALTH = False
 
-AD_DOMAINS = [...]  # (لیست کامل مانند قبل)
-BLOCKED_AD_KEYWORDS = [...]
+AD_DOMAINS = [
+    "doubleclick.net", "googleadsyndication.com", "adservice.google.com",
+    "adsrvr.org", "outbrain.com", "taboola.com", "exoclick.com",
+    "trafficfactory.biz", "propellerads.com", "adnxs.com", "criteo.com",
+    "moatads.com", "amazon-adsystem.com", "pubmatic.com", "openx.net",
+    "rubiconproject.com", "sovrn.com", "indexww.com", "contextweb.com",
+    "advertising.com", "zedo.com", "adzerk.net", "carbonads.com",
+    "buysellads.com", "popads.net", "trafficstars.com", "trafficjunky.com",
+    "eroadvertising.com", "juicyads.com", "plugrush.com",
+    "txxx.com", "fuckbook.com", "traffic-force.com", "bongacams.com",
+    "trafficjunky.net", "adtng.com"
+]
+BLOCKED_AD_KEYWORDS = [
+    "ads", "advert", "popunder", "banner", "doubleclick", "taboola",
+    "outbrain", "popcash", "traffic", "monetize", "adx", "adserving"
+]
 
 def get_or_create_context(chat_id, incognito=False):
     global _global_playwright, _global_browser
@@ -499,7 +559,13 @@ def get_or_create_context(chat_id, incognito=False):
         vh = random.choice([915, 844, 896])
         context = _global_browser.new_context(viewport={"width": vw, "height": vh})
         if incognito: context.clear_cookies()
-        context.on("page", lambda page: ...)
+        def handle_popup(page):
+            try:
+                url = page.url.lower()
+                if any(kw in url for kw in BLOCKED_AD_KEYWORDS) or \
+                   any(ad in url for ad in AD_DOMAINS): page.close()
+            except: pass
+        context.on("page", handle_popup)
         if HAS_STEALTH:
             page = context.new_page()
             try: Stealth().apply_stealth(page)
@@ -516,203 +582,7 @@ def close_user_context(chat_id, incognito=False):
         try: ctx["context"].close()
         except: pass
 
-# ═══════════════════════ فایرفاکس (اختصاصی ضبط) ═══════════════════════
-def get_firefox_browser():
-    """راه‌اندازی فایرفاکس هدلس با پشتیبانی از صدا برای ضبط"""
-    pw = sync_playwright().start()
-    browser = pw.firefox.launch(
-        headless=True,
-        firefox_user_prefs={
-            "media.autoplay.default": 0,      # allow autoplay
-            "media.autoplay.enabled": True,
-            "media.volume_scale": "1.0",
-        },
-        args=[
-            '--no-sandbox',
-            '--enable-audio-output',
-        ]
-    )
-    return pw, browser
-
-# ═══════════════════════ ابزارهای صوتی (PulseAudio + loopback) ═══════════════════════
-def setup_pulseaudio_virtual():
-    try:
-        subprocess.run(["pulseaudio", "-D", "--exit-idle-time=-1"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        time.sleep(1)
-        subprocess.run(["pactl", "load-module", "module-null-sink", "sink_name=virtual_out"], check=True)
-        subprocess.run(["pactl", "load-module", "module-loopback", "source=virtual_out.monitor"], check=True)
-        subprocess.run(["pactl", "set-default-sink", "virtual_out"], check=True)
-        os.environ["PULSE_SERVER"] = f"unix:/run/user/{os.getuid()}/pulse/native"
-        os.environ["PULSE_SINK"] = "virtual_out"
-        debug_log("PulseAudio virtual_out + loopback ready")
-        return True
-    except Exception as e:
-        debug_log(f"PulseAudio setup failed: {e}")
-        return False
-
-def start_audio_capture(job_dir: str) -> Tuple[Optional[subprocess.Popen], str]:
-    audio_path = os.path.join(job_dir, "audio.mp3")
-    if not shutil.which("ffmpeg"): return None, audio_path
-    cmd = [
-        'ffmpeg', '-y',
-        '-f', 'pulse', '-i', 'virtual_out.monitor',
-        '-ac', '2', '-ar', '44100',
-        '-acodec', 'libmp3lame', '-b:a', '128k',
-        audio_path
-    ]
-    try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return proc, audio_path
-    except Exception as e:
-        debug_log(f"ffmpeg start error: {e}")
-        return None, audio_path
-
-def stop_audio_capture(proc: Optional[subprocess.Popen], audio_path: str) -> bool:
-    if not proc: return False
-    try:
-        proc.terminate()
-        proc.wait(timeout=5)
-        size = os.path.getsize(audio_path) if os.path.exists(audio_path) else 0
-        debug_log(f"audio captured: {size} bytes")
-        return size > 0
-    except: return False
-
-# ═══════════════════════ استخراج المان‌ها (مرورگر) ═══════════════════════
-def extract_clickable_and_media(page, mode="text"):
-    # (کد کامل مانند Bot22)
-    ...
-
-def scan_videos_smart(page):
-    # (کد کامل)
-    ...
-
-def smooth_scroll_to_video(page):
-    # (کد کامل)
-    ...
-
-def find_video_center(page):
-    # (کد کامل)
-    ...
-
-# ═══════════════════════ File Helpers ═══════════════════════
-def is_direct_file_url(url: str) -> bool:
-    # (کد کامل)
-    ...
-
-def get_filename_from_url(url):
-    # (کد کامل)
-    ...
-
-def split_file_binary(file_path, prefix, ext):
-    # (کد کامل با اصلاح segment_size)
-    ...
-
-def create_zip_and_split(src, base):
-    # (کد کامل)
-    ...
-
-# ═══════════════════════ Screenshots ═══════════════════════
-def screenshot_full(context, url, out):
-    # (کد کامل)
-    ...
-
-def screenshot_2x(context, url, out):
-    # (کد کامل)
-    ...
-
-def screenshot_4k(context, url, out):
-    # (کد کامل)
-    ...
-
-# ═══════════════════════ دانلود کامل سایت ═══════════════════════
-# (تابع download_full_website و _finish_website_download بدون تغییر از Bot22)
-
-# ═══════════════════════ صف و Worker مشترک ═══════════════════════
-QUEUE_FILE = "queue.json"
-# (همه توابع load_queue, save_queue, enqueue, pop_queued, find_job, update_job, ... بدون تغییر)
-
-WORKERS_FILE = "workers.json"
-# (همه توابع load_workers, save_workers, find_idle_worker, set_worker_busy, set_worker_idle بدون تغییر)
-
-RECORD_QUEUE_FILE = "record_queue.json"
-# (همه توابع record queue بدون تغییر)
-
-# ═══════════════════════ Worker Loop (با تفکیک general و record) ═══════════════════════
-def worker_loop(worker_id, stop_event, worker_type="general"):
-    # (کد بدون تغییر)
-    ...
-
-def process_record_job(worker_id, job):
-    if job.mode == "record_video":
-        handle_record_video(job)
-    else:
-        job.status = "error"; update_job(job)
-
-def process_job(worker_id, job):
-    # (پیاده‌سازی کامل dispatch بر اساس mode، از جمله interactive_scan, fullpage_screenshot)
-    ...
-
-# ═══════════════════════ ادامه در پارت دوم... ═══════════════════════
-
-def split_file_binary(file_path, prefix, ext):
-    d = os.path.dirname(file_path) or "."
-    parts = []
-    if not os.path.exists(file_path):
-        return []
-
-    video_exts = ('.webm', '.mkv', '.mp4', '.avi', '.mov')
-    if ext.lower() in video_exts and shutil.which('ffmpeg'):
-        try:
-            out_pattern = os.path.join(d, f"{prefix}_part%03d{ext}")
-            cmd = [
-                'ffmpeg', '-y', '-i', file_path,
-                '-c', 'copy', '-map', '0',
-                '-f', 'segment', '-segment_size', str(ZIP_PART_SIZE),
-                '-reset_timestamps', '1',
-                out_pattern
-            ]
-            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
-            parts = sorted([os.path.join(d, f) for f in os.listdir(d) if f.startswith(f"{prefix}_part") and f.endswith(ext)])
-            if parts:
-                return parts
-        except Exception as e:
-            safe_print(f"ffmpeg segment failed: {e}, falling back to binary split")
-
-    # روش باینری (فال‌بک)
-    with open(file_path, "rb") as f:
-        i = 1
-        while True:
-            chunk = f.read(ZIP_PART_SIZE)
-            if not chunk:
-                break
-            if ext.lower() == ".zip":
-                pname = f"{prefix}.zip.{i:03d}"
-            else:
-                pname = f"{prefix}.part{i:03d}{ext}"
-            ppath = os.path.join(d, pname)
-            with open(ppath, "wb") as pf:
-                pf.write(chunk)
-            parts.append(ppath)
-            i += 1
-    return parts
-
-def create_zip_and_split(src, base):
-    d = os.path.dirname(src) or "."
-    if not os.path.exists(src):
-        return []
-    zp = os.path.join(d, f"{base}.zip")
-    try:
-        with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.write(src, os.path.basename(src))
-    except:
-        return []
-    if os.path.getsize(zp) <= ZIP_PART_SIZE:
-        return [zp]
-    parts = split_file_binary(zp, base, ".zip")
-    os.remove(zp)
-    return parts
-
-# ═══════════════════════ استخراج المان‌ها (کامل) ═══════════════════════
+# ═══════════════════════ استخراج المان‌ها ═══════════════════════
 def extract_clickable_and_media(page, mode="text"):
     if mode == "text":
         raw = page.evaluate("""() => {
@@ -979,6 +849,96 @@ def screenshot_4k(context, url, out):
     finally:
         page.close()
 
+# ═══════════════════════ ابزارهای فایل ═══════════════════════
+def is_direct_file_url(url: str) -> bool:
+    known_extensions = [
+        '.zip','.rar','.7z','.pdf','.mp4','.mkv','.avi','.mp3',
+        '.exe','.apk','.dmg','.iso','.tar','.gz','.bz2','.xz','.whl',
+        '.deb','.rpm','.msi','.pkg','.appimage','.jar','.war',
+        '.py','.sh','.bat','.run','.bin','.img','.mov','.flv','.wmv',
+        '.webm','.ogg','.wav','.flac','.csv','.docx','.pptx','.m3u8'
+    ]
+    path = urlparse(url).path.lower()
+    if any(path.endswith(ext) for ext in known_extensions): return True
+    filename = path.split('/')[-1]
+    if '.' in filename:
+        ext = filename.rsplit('.', 1)[-1]
+        if ext and re.match(r'^[a-zA-Z0-9_-]+$', ext) and len(ext) <= 10: return True
+    return False
+
+def get_filename_from_url(url):
+    path = unquote(urlparse(url).path)
+    name = os.path.basename(path)
+    return name if name and '.' in name else "downloaded_file"
+
+def crawl_for_download_link(start_url, max_depth=1, max_pages=10, timeout_seconds=30):
+    visited = set()
+    q = queue.Queue(); q.put((start_url, 0))
+    s = requests.Session(); s.headers.update({"User-Agent": "Mozilla/5.0"})
+    pc = 0; start_time = time.time()
+    while not q.empty():
+        if time.time() - start_time > timeout_seconds: break
+        cur, depth = q.get()
+        if cur in visited or depth > max_depth or pc > max_pages: continue
+        visited.add(cur); pc += 1
+        try: r = s.get(cur, timeout=10)
+        except: continue
+        if is_direct_file_url(cur): return cur
+        if "text/html" in r.headers.get("Content-Type", ""):
+            soup = BeautifulSoup(r.text, "html.parser")
+            for a in soup.find_all("a", href=True):
+                href = urljoin(cur, a["href"])
+                if is_direct_file_url(href): return href
+                if depth + 1 <= max_depth: q.put((href, depth+1))
+    return None
+
+def split_file_binary(file_path, prefix, ext):
+    d = os.path.dirname(file_path) or "."
+    parts = []
+    if not os.path.exists(file_path): return []
+
+    video_exts = ('.webm', '.mkv', '.mp4', '.avi', '.mov')
+    if ext.lower() in video_exts and shutil.which('ffmpeg'):
+        try:
+            out_pattern = os.path.join(d, f"{prefix}_part%03d{ext}")
+            cmd = [
+                'ffmpeg', '-y', '-i', file_path,
+                '-c', 'copy', '-map', '0',
+                '-f', 'segment', '-segment_size', str(ZIP_PART_SIZE),
+                '-reset_timestamps', '1',
+                out_pattern
+            ]
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+            parts = sorted([os.path.join(d, f) for f in os.listdir(d) if f.startswith(f"{prefix}_part") and f.endswith(ext)])
+            if parts: return parts
+        except Exception as e:
+            safe_print(f"ffmpeg segment failed: {e}, falling back to binary split")
+
+    with open(file_path, "rb") as f:
+        i = 1
+        while True:
+            chunk = f.read(ZIP_PART_SIZE)
+            if not chunk: break
+            if ext.lower() == ".zip": pname = f"{prefix}.zip.{i:03d}"
+            else: pname = f"{prefix}.part{i:03d}{ext}"
+            ppath = os.path.join(d, pname)
+            with open(ppath, "wb") as pf: pf.write(chunk)
+            parts.append(ppath); i += 1
+    return parts
+
+def create_zip_and_split(src, base):
+    d = os.path.dirname(src) or "."
+    if not os.path.exists(src): return []
+    zp = os.path.join(d, f"{base}.zip")
+    try:
+        with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(src, os.path.basename(src))
+    except: return []
+    if os.path.getsize(zp) <= ZIP_PART_SIZE: return [zp]
+    parts = split_file_binary(zp, base, ".zip")
+    os.remove(zp)
+    return parts
+
 # ═══════════════════════ دانلود کامل سایت ═══════════════════════
 def download_full_website(job):
     chat_id = job.chat_id; url = job.url
@@ -1030,13 +990,14 @@ def _finish_website_download(job, job_dir):
     job.status = "done"; update_job(job)
     shutil.rmtree(job_dir, ignore_errors=True)
 
-# ═══════════════════════ صف و Worker ═══════════════════════
+# ═══════════════════════ اینجا پارت اول به پایان می‌رسد. ادامه (صف، Workerها، دانلود، ضبط، کاوشگر، شات کامل، مدیریت پیام و حلقه اصلی) در پارت دوم ارائه خواهد شد. ═══════════════════════
+# ═══════════════════════ صف و Workerها ═══════════════════════
 QUEUE_FILE = "queue.json"
 def load_queue():
     try:
         with open(QUEUE_FILE) as f: return json.load(f)
     except: return []
-def save_queue(data): 
+def save_queue(data):
     tmp = QUEUE_FILE + ".tmp"
     with open(tmp, "w") as f: json.dump(data, f)
     os.replace(tmp, QUEUE_FILE)
@@ -1101,9 +1062,8 @@ WORKERS_FILE = "workers.json"
 def load_workers():
     try:
         with open(WORKERS_FILE) as f: return json.load(f)
-    except: return [asdict(WorkerInfo(i, worker_type="general")) for i in range(2)] + \
-                   [asdict(WorkerInfo(2, worker_type="record"))]
-def save_workers(data): 
+    except: return [asdict(WorkerInfo(i, worker_type="general")) for i in range(3)]
+def save_workers(data):
     tmp = WORKERS_FILE + ".tmp"
     with open(tmp, "w") as f: json.dump(data, f)
     os.replace(tmp, WORKERS_FILE)
@@ -1128,6 +1088,7 @@ def set_worker_idle(wid):
                 w["status"] = "idle"; w["current_job_id"] = None
         save_workers(wlist)
 
+# صف جداگانه برای ضبط (اختیاری، ولی برای نظم)
 RECORD_QUEUE_FILE = "record_queue.json"
 def load_record_queue():
     try:
@@ -1318,7 +1279,7 @@ def process_job(worker_id, job):
                 set_session(s)
                 send_message(chat_id, "🔄 آماده.", reply_markup=main_menu_keyboard(s.is_admin))
 
-# ═══════════════════════ دانلود هوشمند / کور ═══════════════════════
+# ═══════════════════════ دانلود هوشمند ═══════════════════════
 def handle_download(job, job_dir):
     chat_id = job.chat_id; session = get_session(chat_id)
     url = job.url
@@ -1450,13 +1411,12 @@ def handle_blind_download(job):
         job.status = "error"; update_job(job)
         shutil.rmtree(job_dir, ignore_errors=True)
 
-# ═══════════════════════ ضبط ویدیو (فایرفاکس + PulseAudio loopback) ═══════════════════════
+# ═══════════════════════ ضبط ویدیو (کروم ساده بدون صدا) ═══════════════════════
 def handle_record_video(job):
     chat_id = job.chat_id; session = get_session(chat_id)
     url = job.url
     rec_time = session.settings.record_time
     behavior = session.settings.record_behavior
-    audio_enabled = session.settings.audio_enabled
     video_format = session.settings.video_format
     delivery = session.settings.video_delivery
     resolution = session.settings.video_resolution
@@ -1478,16 +1438,18 @@ def handle_record_video(job):
     behavior_names = {"click": "کلیک هوشمند", "scroll": "اسکرول نرم", "live": "لایو کامند"}
     send_message(chat_id, f"🎬 ضبط {rec_time} ثانیه ({behavior_names.get(behavior, behavior)}) با کیفیت {resolution}...")
 
-    audio_proc = None; audio_path = None
     _rec_pw = None; _rec_browser = None
-
     try:
-        if audio_enabled:
-            if setup_pulseaudio_virtual():
-                audio_proc, audio_path = start_audio_capture(job_dir)
-
-        # راه‌اندازی فایرفاکس
-        _rec_pw, _rec_browser = get_firefox_browser()
+        _rec_pw = sync_playwright().start()
+        _rec_browser = _rec_pw.chromium.launch(
+            headless=False if os.environ.get("DISPLAY") else True,
+            args=[
+                "--no-sandbox", "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage", "--disable-gpu",
+                "--disable-blink-features=AutomationControlled",
+                "--autoplay-policy=no-user-gesture-required",
+            ]
+        )
         context = _rec_browser.new_context(
             viewport={"width": w, "height": h},
             record_video_dir=job_dir,
@@ -1509,8 +1471,6 @@ def handle_record_video(job):
             page.wait_for_timeout(rec_time * 1000)
         finally:
             page.close(); context.close()
-
-        audio_ok = stop_audio_capture(audio_proc, audio_path) if audio_proc else False
 
         webm = None
         for f in os.listdir(job_dir):
@@ -1556,8 +1516,6 @@ def handle_record_video(job):
 
         use_zip = (delivery == "zip")
         send_file(final_video_path, "🎬 ویدیو", use_zip)
-        if audio_ok and audio_path and os.path.exists(audio_path):
-            send_file(audio_path, "🎵 صوت", use_zip)
 
         job.status = "done"; update_job(job)
         debug_log(f"Recording done for job {job.job_id}")
@@ -1589,20 +1547,17 @@ def handle_interactive_scan(job):
 
         elements = page.evaluate("""() => {
             const results = [];
-            // تمام فیلدهای متنی و قابل ویرایش
             document.querySelectorAll('input[type="text"], input[type="search"], input[type="email"], input[type="url"], input[type="tel"], input[type="number"], textarea, [contenteditable="true"]').forEach((el, idx) => {
                 if (el.offsetWidth === 0 && el.offsetHeight === 0) return;
                 const placeholder = el.placeholder || el.getAttribute('aria-label') || el.textContent?.trim()?.substring(0, 50) || 'بدون عنوان';
                 const name = el.name || el.id || '';
                 const form = el.closest('form');
                 const formAction = form ? form.action || '' : '';
-                // دکمه مجاور
                 let submitBtn = null;
                 if (form) {
                     const btn = form.querySelector('button[type="submit"], input[type="submit"], button:not([type])');
                     if (btn) submitBtn = {text: btn.textContent?.trim() || btn.value || 'ارسال', type: btn.tagName};
                 }
-                // دکمه با onclick
                 if (!submitBtn) {
                     const allBtns = document.querySelectorAll('button, input[type="button"], [role="button"]');
                     let closest = null, minDist = Infinity;
@@ -1685,7 +1640,6 @@ def handle_interactive_execute(job):
         page.goto(url, timeout=60000, wait_until="domcontentloaded")
         page.wait_for_timeout(2000)
 
-        # پر کردن فیلد
         page.evaluate(f"""() => {{
             const el = document.querySelector('{target["selector"]}') || document.querySelector('input[type="text"], textarea');
             if (el) {{
@@ -1699,7 +1653,6 @@ def handle_interactive_execute(job):
 
         time.sleep(1)
 
-        # کلیک روی دکمه
         if target.get("submitBtn"):
             page.evaluate(f"""() => {{
                 const btns = document.querySelectorAll('button, input[type="submit"], [role="button"]');
@@ -1712,10 +1665,8 @@ def handle_interactive_execute(job):
         else:
             page.keyboard.press("Enter")
 
-        # انتظار برای نتیجه (۱۰ ثانیه)
         page.wait_for_timeout(10000)
 
-        # اسکرین‌شات کامل از صفحه جدید
         spath = os.path.join(job_dir, "interactive_result.png")
         page.screenshot(path=spath, full_page=True)
         send_document(chat_id, spath, caption=f"📸 نتیجه جستجوی «{user_text}»")
@@ -1858,7 +1809,7 @@ def send_browser_page(chat_id, image_path=None, url="", page_num=0):
         send_message(chat_id, "\n".join(lines))
         session.text_links = cmds; set_session(session)
 
-# ═══════════════════════ اسکن و تحلیل ═══════════════════════
+# ═══════════════════════ اسکن و تحلیل (ادامه) ═══════════════════════
 def handle_scan_videos(job):
     chat_id = job.chat_id; session = get_session(chat_id)
     ctx = get_or_create_context(chat_id, session.settings.incognito_mode)
@@ -2158,6 +2109,10 @@ def handle_message(chat_id, text):
             send_message(chat_id, f"🔄 وضعیت سرویس: **{status}**")
             return
 
+    if text == "/unsubscribe":
+        handle_unsubscribe(chat_id)
+        return
+
     if text == "/start":
         session.state = "idle"; session.click_counter = 0; set_session(session)
         if session.is_admin or session.subscription != "پایه":
@@ -2170,7 +2125,6 @@ def handle_message(chat_id, text):
             send_message(chat_id, "👋 برای شروع یکی از گزینه‌ها را انتخاب کنید:", reply_markup=kb)
         return
 
-    # حالت انتظار کد
     if session.state == "waiting_code":
         sub = activate_subscription(chat_id, text)
         if sub:
@@ -2184,7 +2138,6 @@ def handle_message(chat_id, text):
             send_message(chat_id, "⛔ کد نامعتبر یا قبلاً مصرف شده است.")
         return
 
-    # حالت کاوشگر تعاملی /t1 ... 
     if text.startswith("/t") and session.interactive_elements:
         parts = text[2:].strip().split(maxsplit=1)
         try:
@@ -2198,7 +2151,6 @@ def handle_message(chat_id, text):
             send_message(chat_id, "❌ فرمت نادرست. مثال: /t1 متن جستجو")
         return
 
-    # لینک‌های مستقیم
     if session.state.startswith("waiting_url_"):
         url = text
         if not (url.startswith("http://") or url.startswith("https://")):
@@ -2237,7 +2189,6 @@ def handle_message(chat_id, text):
         send_message(chat_id, "✅ در صف قرار گرفت.")
         return
 
-    # فرمان‌های browse
     if session.state == "browsing" and session.text_links and text in session.text_links:
         url = session.text_links.pop(text)
         set_session(session)
@@ -2496,7 +2447,7 @@ def _settings_toggle(chat_id, session, data, cid):
     elif data == "set_brwmode": modes = ["text", "media", "explorer"]; idx = modes.index(session.settings.browser_mode); session.settings.browser_mode = modes[(idx+1)%3]
     elif data == "set_deep": session.settings.deep_scan_mode = "everything" if session.settings.deep_scan_mode == "logical" else "logical"
     elif data == "set_recbeh": behaviors = ["click", "scroll", "live"]; idx = behaviors.index(session.settings.record_behavior); session.settings.record_behavior = behaviors[(idx+1)%3]
-    elif data == "set_audio": session.settings.audio_enabled = not session.settings.audio_enabled
+    elif data == "set_audio": session.settings.audio_enabled = not session.settings.audio_enabled  # فعلاً بی‌صدا
     elif data == "set_vfmt": formats = ["webm", "mkv", "mp4"]; idx = formats.index(session.settings.video_format); session.settings.video_format = formats[(idx+1)%3]
     elif data == "set_incognito": session.settings.incognito_mode = not session.settings.incognito_mode
     elif data == "set_viddel": session.settings.video_delivery = "zip" if session.settings.video_delivery == "split" else "split"
@@ -2532,12 +2483,12 @@ def polling_loop(stop_event):
 
 def main():
     os.makedirs("jobs_data", exist_ok=True)
+    init_subscriptions_from_backup()  # بارگذاری کدها از پشتیبان
     stop_event = threading.Event()
-    for i in range(2):
+    for i in range(3):
         threading.Thread(target=worker_loop, args=(i, stop_event, "general"), daemon=True).start()
-    threading.Thread(target=worker_loop, args=(2, stop_event, "record"), daemon=True).start()
     threading.Thread(target=polling_loop, args=(stop_event,), daemon=True).start()
-    safe_print("✅ Bot23 Phoenix اجرا شد")
+    safe_print("✅ Bot23 Stable اجرا شد")
     try:
         while True: time.sleep(1)
     except KeyboardInterrupt: stop_event.set()
