@@ -93,7 +93,7 @@ flood_lock = threading.Lock()
 user_flood_data: Dict[int, List[float]] = {}
 user_ban_until: Dict[int, float] = {}
 admin_bans: Dict[int, float] = {}
-subscriptions_lock = threading.Lock()      # ★★★ کلید حل باگ
+subscriptions_lock = threading.RLock()      # ★★★ کلید حل باگ
 
 QUEUE_FILES = {
     "browser": "browser_queue.json",
