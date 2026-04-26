@@ -1,4 +1,4 @@
-name: Bot23 Stable Runnerrrr
+name: Bot23 Stable Runnerccy
 
 on:
   schedule:
@@ -10,25 +10,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360         # حداکثر ۶ ساعت
     env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # رفع هشدار Node.js 20
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # تأکید دوباره برای Node 24
 
     steps:
       - name: دریافت کد از مخزن
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5   # ★ ورژن جدیدتر
 
       - name: نصب پایتون
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6   # ★ ورژن جدیدتر
         with:
           python-version: '3.10'
 
-      - name: نصب پیش‌نیازها (Xvfb و FFmpeg)
+      - name: نصب پیش‌نیازها
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq xvfb ffmpeg
           pip install requests beautifulsoup4 playwright
           pip install playwright_stealth
 
-      - name: نصب مرورگر کروم برای Playwright
+      - name: نصب کروم برای Playwright
         run: |
           playwright install chromium
           playwright install-deps chromium
