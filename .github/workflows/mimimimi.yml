@@ -1,39 +1,50 @@
-name: Bommm
+name: Bot Dynasty - Pho
+
 on:
   schedule:
-    - cron: "0 */6 * * *"        # هر ۶ ساعت یک‌بار
+    - cron: "0 */6 * * *"        # هر ۶ ساعت یکبار
   workflow_dispatch:            # اجرای دستی
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 360         # حداکثر ۶ ساعت
+    timeout-minutes: 350         # حداکثر ۵ ساعت و ۵۰ دقیقه
     env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # رفع هشدار Node.js 20
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true # سکوت هشدار Node.js
+      DISPLAY: :99               # ★ تنظیم نمایشگر مجازی برای Playwright
 
     steps:
       - name: دریافت کد از مخزن
         uses: actions/checkout@v4
 
-      - name: نصب پایتون
+      - name: راه‌اندازی پایتون 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: نصب پیش‌نیازها (فقط Xvfb و FFmpeg)
+      - name: نصب Xvfb و PulseAudio (برای پایداری)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq xvfb ffmpeg
+          sudo apt-get install -y -qq xvfb pulseaudio
+
+      - name: راه‌اندازی سرور نمایش مجازی (Xvfb)
+        run: |
+          # اجرای Xvfb در پس‌زمینه روی نمایشگر :99
+          Xvfb :99 -screen 0 1920x1080x24 &
+          sleep 2 # کمی صبر برای اطمینان از راه‌اندازی
+
+      - name: نصب وابستگی‌های Python
+        run: |
           pip install requests beautifulsoup4 playwright
           pip install playwright_stealth
 
-      - name: نصب مرورگر کروم برای Playwright
+      - name: نصب Chromium و تمام وابستگی‌های سیستم‌عامل
         run: |
-          playwright install chromium
-          playwright install-deps chromium
+          playwright install --with-deps chromium
+          # توجه: این دستور مطمئن می‌شود همه چیز برای اجرای کرومیوم آماده است.
 
-      - name: اجرای ربات (۳۵۵ دقیقه)
+      - name: ▶️ اجرای ربات (۵ ساعت و ۴۵ دقیقه)
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
         run: |
-          timeout 21300 python Bot.py
+          python Bot.py
