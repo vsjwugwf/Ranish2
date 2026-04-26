@@ -210,6 +210,9 @@ def is_user_banned(chat_id: int) -> bool:
 SUBSCRIPTIONS_FILE = "subscriptions.json"
 SERVICE_DISABLED_FLAG = "service_disabled.flag"
 
+def is_service_disabled() -> bool:
+    return os.path.exists(SERVICE_DISABLED_FLAG)
+
 def load_subscriptions() -> Dict[str, Any]:
     with subscriptions_lock:
         try:
