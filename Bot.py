@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Bot23 Stable — بدون صدا، فقط کروم
-کاوشگر تعاملی، شات کامل، اشتراک دائمی، ضد اسپم.
+Bot24 Pro — معماری دوگانه (کروم + فایرفاکس)، مدیریت تحریم، پنل ادمین پیشرفته
+راهنما، ذخیره دائمی تنظیمات، رفع باگ کاوشگر و شات کامل، ضد اسپم جدید.
 """
 
 import os, sys, json, time, math, queue, shutil, zipfile, uuid, re, hashlib
@@ -29,6 +29,7 @@ ZIP_PART_SIZE = int(19 * 1024 * 1024)       # 19MB
 ADMIN_CHAT_ID = 46829437
 
 CODES_BACKUP_FILE = "codes_backup.json"
+BANS_FILE = "bans.json"
 
 # ═══════════════════════ سطوح اشتراک ═══════════════════════
 PLAN_LIMITS = {
@@ -91,6 +92,7 @@ record_queue_lock = threading.Lock()
 flood_lock = threading.Lock()
 user_flood_data: Dict[int, List[float]] = {}
 user_ban_until: Dict[int, float] = {}
+admin_bans: Dict[int, float] = {}  # زمان پایان تحریم (ابد = 9999999999)
 
 def debug_log(msg: str):
     try:
@@ -155,7 +157,54 @@ class WorkerInfo:
     worker_id: int
     current_job_id: Optional[str] = None
     status: str = "idle"
-    worker_type: str = "general"
+    worker_type: str = "general"   # "general" یا "record"
+
+# ═══════════════════════ بارگذاری/ذخیره تحریم‌ها ═══════════════════════
+def load_bans():
+    try:
+        with open(BANS_FILE, "r") as f:
+            return {int(k): v for k, v in json.load(f).items()}
+    except:
+        return {}
+
+def save_bans(data: Dict[int, float]):
+    tmp = BANS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({str(k): v for k, v in data.items()}, f)
+    os.replace(tmp, BANS_FILE)
+
+def ban_user(chat_id: int, minutes: Optional[int] = None):
+    now = time.time()
+    with flood_lock:
+        if minutes is None:
+            admin_bans[chat_id] = 9999999999  # ابد
+        else:
+            admin_bans[chat_id] = now + minutes * 60
+        save_bans(admin_bans)
+
+def unban_user(chat_id: int):
+    with flood_lock:
+        if chat_id in admin_bans:
+            del admin_bans[chat_id]
+            save_bans(admin_bans)
+            return True
+        return False
+
+def is_user_banned(chat_id: int) -> bool:
+    if chat_id == ADMIN_CHAT_ID:
+        return False
+    now = time.time()
+    with flood_lock:
+        if chat_id in admin_bans and now < admin_bans[chat_id]:
+            return True
+        # پاک‌سازی تحریم‌های منقضی‌شده
+        if chat_id in admin_bans:
+            del admin_bans[chat_id]
+            save_bans(admin_bans)
+        # anti-flood
+        if chat_id in user_ban_until and now < user_ban_until[chat_id]:
+            return True
+        return False
 
 # ═══════════════════════ مدیریت اشتراک (با پشتیبان‌گیری) ═══════════════════════
 SUBSCRIPTIONS_FILE = "subscriptions.json"
@@ -209,7 +258,7 @@ def activate_subscription(chat_id: int, code: str) -> Optional[str]:
 # ═══════════════════════ پشتیبان‌گیری کدها ═══════════════════════
 def git_push_backup():
     try:
-        subprocess.run(["git", "config", "user.name", "Bot23"], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(["git", "config", "user.name", "Bot24"], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         subprocess.run(["git", "config", "user.email", "bot@local"], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         subprocess.run(["git", "add", CODES_BACKUP_FILE], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
         subprocess.run(["git", "commit", "-m", "Update codes backup"], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
@@ -330,16 +379,16 @@ def update_usage(chat_id: int, mode: str):
         usage.append(time.time())
         save_subscriptions(data)
 
-# ═══════════════════════ ضد اسپم ═══════════════════════
-FLOOD_WINDOW = 60
-FLOOD_MAX_CLICKS = 3
+# ═══════════════════════ ضد اسپم خودکار (جدید: ۱۰ کلیک در ۵ ثانیه) ═══════════════════════
+FLOOD_WINDOW = 5
+FLOOD_MAX_CLICKS = 10
 BAN_DURATION = 900
 
 def check_flood(chat_id: int) -> bool:
     if chat_id == ADMIN_CHAT_ID: return True
     now = time.time()
     with flood_lock:
-        if chat_id in user_ban_until and now < user_ban_until[chat_id]:
+        if is_user_banned(chat_id):
             return False
         clicks = user_flood_data.get(chat_id, [])
         clicks = [t for t in clicks if now - t < FLOOD_WINDOW]
@@ -349,12 +398,6 @@ def check_flood(chat_id: int) -> bool:
             user_ban_until[chat_id] = now + BAN_DURATION
             return False
         return True
-
-def is_user_banned(chat_id: int) -> bool:
-    if chat_id == ADMIN_CHAT_ID: return False
-    now = time.time()
-    with flood_lock:
-        return chat_id in user_ban_until and now < user_ban_until[chat_id]
 
 # ═══════════════════════ ذخیره‌سازی نشست‌ها ═══════════════════════
 SESSIONS_FILE = "sessions.json"
@@ -444,8 +487,8 @@ def main_menu_keyboard(is_admin=False):
          {"text": "📸 شات", "callback_data": "menu_screenshot"}],
         [{"text": "📥 دانلود", "callback_data": "menu_download"},
          {"text": "🎬 ضبط", "callback_data": "menu_record"}],
-        [{"text": "🔎 کاوشگر", "callback_data": "menu_interactive"}],
-        [{"text": "⚙️ تنظیمات", "callback_data": "menu_settings"}]
+        [{"text": "⚙️ تنظیمات", "callback_data": "menu_settings"},
+         {"text": "❓ راهنما", "callback_data": "menu_help"}]
     ]
     if is_admin: base.append([{"text": "🛠️ پنل ادمین", "callback_data": "menu_admin"}])
     return {"inline_keyboard": base}
@@ -456,7 +499,6 @@ def settings_keyboard(settings: UserSettings, subscription: str):
     mode = {"text": "📄 متن", "media": "🎬 مدیا", "explorer": "🔍 جستجوگر"}[settings.browser_mode]
     deep = "🧠 منطقی" if settings.deep_scan_mode == "logical" else "🗑 همه چیز"
     rec_behavior = {"click": "🖱️ کلیک", "scroll": "📜 اسکرول", "live": "🎭 لایو"}[settings.record_behavior]
-    audio = "🔇 بی‌صدا"
     vfmt = settings.video_format.upper()
     incognito = "🕶️ ناشناس" if settings.incognito_mode else "👤 عادی"
     delivery = "ZIP 📦" if settings.video_delivery == "zip" else "تکه‌ای 🧩"
@@ -468,7 +510,6 @@ def settings_keyboard(settings: UserSettings, subscription: str):
         [{"text": f"🌐 حالت: {mode}", "callback_data": "set_brwmode"}],
         [{"text": f"🔍 جستجو: {deep}", "callback_data": "set_deep"}],
         [{"text": f"🎬 رفتار: {rec_behavior}", "callback_data": "set_recbeh"}],
-        [{"text": audio, "callback_data": "set_audio"}],
         [{"text": f"🎞️ فرمت: {vfmt}", "callback_data": "set_vfmt"}],
         [{"text": incognito, "callback_data": "set_incognito"}],
         [{"text": f"📦 ارسال: {delivery}", "callback_data": "set_viddel"}],
@@ -477,7 +518,7 @@ def settings_keyboard(settings: UserSettings, subscription: str):
     ]
     return {"inline_keyboard": kb}
 
-# ═══════════════════════ Playwright (فقط کروم) ═══════════════════════
+# ═══════════════════════ Playwright (کروم + فایرفاکس) ═══════════════════════
 _global_playwright = None
 _global_browser = None
 browser_contexts = {}
@@ -962,8 +1003,7 @@ def _finish_website_download(job, job_dir):
     job.status = "done"; update_job(job)
     shutil.rmtree(job_dir, ignore_errors=True)
 
-# ═══════════════════════ ادامه در پارت دوم... ═══════════════════════
-
+# ═══════════════════════ اینجا پارت اول به پایان می‌رسد. ادامه (صف، Workerها، دانلود، ضبط با فایرفاکس، کاوشگر، شات کامل، پنل ادمین، مدیریت پیام و حلقه اصلی) در پارت دوم ارائه خواهد شد. ═══════════════════════
 # ═══════════════════════ صف و Workerها ═══════════════════════
 QUEUE_FILE = "queue.json"
 def load_queue():
@@ -1035,7 +1075,8 @@ WORKERS_FILE = "workers.json"
 def load_workers():
     try:
         with open(WORKERS_FILE) as f: return json.load(f)
-    except: return [asdict(WorkerInfo(i, worker_type="general")) for i in range(3)]
+    except: return [asdict(WorkerInfo(i, worker_type="general")) for i in range(2)] + \
+                   [asdict(WorkerInfo(2, worker_type="record"))]
 def save_workers(data):
     tmp = WORKERS_FILE + ".tmp"
     with open(tmp, "w") as f: json.dump(data, f)
@@ -1383,7 +1424,20 @@ def handle_blind_download(job):
         job.status = "error"; update_job(job)
         shutil.rmtree(job_dir, ignore_errors=True)
 
-# ═══════════════════════ ضبط ویدیو (کروم ساده بدون صدا) ═══════════════════════
+# ═══════════════════════ ضبط ویدیو (فایرفاکس پایدار) ═══════════════════════
+def get_firefox_browser():
+    pw = sync_playwright().start()
+    browser = pw.firefox.launch(
+        headless=False if os.environ.get("DISPLAY") else True,
+        firefox_user_prefs={
+            "media.autoplay.default": 0,
+            "media.autoplay.enabled": True,
+            "media.volume_scale": "1.0",
+        },
+        args=['--no-sandbox']
+    )
+    return pw, browser
+
 def handle_record_video(job):
     chat_id = job.chat_id; session = get_session(chat_id)
     url = job.url
@@ -1412,23 +1466,13 @@ def handle_record_video(job):
 
     _rec_pw = None; _rec_browser = None
     try:
-        _rec_pw = sync_playwright().start()
-        _rec_browser = _rec_pw.chromium.launch(
-            headless=False if os.environ.get("DISPLAY") else True,
-            args=[
-                "--no-sandbox", "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage", "--disable-gpu",
-                "--disable-blink-features=AutomationControlled",
-                "--autoplay-policy=no-user-gesture-required",
-            ]
-        )
+        _rec_pw, _rec_browser = get_firefox_browser()
         context = _rec_browser.new_context(
             viewport={"width": w, "height": h},
             record_video_dir=job_dir,
             record_video_size={"width": w, "height": h}
         )
         page = context.new_page()
-
         need_scroll = (job.extra or {}).get("live_scroll", False)
 
         try:
@@ -1504,7 +1548,7 @@ def handle_record_video(job):
             try: _rec_pw.stop()
             except: pass
 
-# ═══════════════════════ کاوشگر تعاملی ═══════════════════════
+# ═══════════════════════ کاوشگر تعاملی (وصله‌شده) ═══════════════════════
 def handle_interactive_scan(job):
     chat_id = job.chat_id; session = get_session(chat_id)
     url = session.browser_url or job.url
@@ -1541,6 +1585,11 @@ def handle_interactive_scan(job):
                     });
                     if (closest) submitBtn = {text: closest.textContent?.trim() || closest.value || 'کلیک', type: closest.tagName};
                 }
+                // رفع باگ selector خالی
+                let selector = '';
+                if (el.id) selector = '#' + el.id;
+                else if (el.name) selector = '[name="' + el.name + '"]';
+                else selector = el.tagName + ':nth-of-type(' + (idx+1) + ')';
                 results.push({
                     index: idx + 1,
                     type: el.tagName,
@@ -1548,7 +1597,7 @@ def handle_interactive_scan(job):
                     name: name,
                     formAction: formAction,
                     submitBtn: submitBtn,
-                    selector: `#${el.id}` || `[name="${el.name}"]` || `${el.tagName}:nth-of-type(${idx+1})`
+                    selector: selector
                 });
             });
             return results;
@@ -1664,8 +1713,8 @@ def handle_fullpage_screenshot(job):
 
     try:
         send_message(chat_id, "📸 در حال بارگذاری کامل صفحه...")
-        page.goto(job.url, timeout=120000, wait_until="networkidle")
-        page.wait_for_timeout(2000)
+        page.goto(job.url, timeout=120000, wait_until="domcontentloaded")
+        page.wait_for_timeout(5000)
         spath = os.path.join(job_dir, "fullpage.png")
         page.screenshot(path=spath, full_page=True)
         send_document(chat_id, spath, caption="✅ شات کامل (Full Page)")
@@ -1766,6 +1815,7 @@ def send_browser_page(chat_id, image_path=None, url="", page_num=0):
         keyboard_rows.append([{"text": "📋 فرامین", "callback_data": f"extcmd_{chat_id}"}])
         keyboard_rows.append([{"text": "🎬 ضبط", "callback_data": f"recvid_{chat_id}"}])
         keyboard_rows.append([{"text": "📸 شات کامل", "callback_data": f"fullshot_{chat_id}"}])
+        keyboard_rows.append([{"text": "🔎 کاوشگر", "callback_data": f"intscan_{chat_id}"}])
     if sub in ("الماسی") or session.is_admin:
         keyboard_rows.append([{"text": "🌐 دانلود سایت", "callback_data": f"dlweb_{chat_id}"}])
     keyboard_rows.append([{"text": "❌ بستن", "callback_data": f"closebrowser_{chat_id}"}])
@@ -1783,7 +1833,7 @@ def send_browser_page(chat_id, image_path=None, url="", page_num=0):
         send_message(chat_id, "\n".join(lines))
         session.text_links = cmds; set_session(session)
 
-# ═══════════════════════ اسکن و تحلیل (ادامه) ═══════════════════════
+# ═══════════════════════ اسکن و تحلیل (بدون تغییر) ═══════════════════════
 def handle_scan_videos(job):
     chat_id = job.chat_id; session = get_session(chat_id)
     ctx = get_or_create_context(chat_id, session.settings.incognito_mode)
@@ -1996,7 +2046,7 @@ def handle_extract_commands(job):
     set_session(session)
     job.status = "done"; update_job(job)
 
-# ═══════════════════════ پنل ادمین ═══════════════════════
+# ═══════════════════════ پنل ادمین (با لیست کاربران و راهنما) ═══════════════════════
 def admin_panel(chat_id):
     try:
         mem = subprocess.run(['free', '-m'], stdout=subprocess.PIPE, text=True).stdout.strip()
@@ -2011,11 +2061,23 @@ def admin_panel(chat_id):
                f"⏱️ **آپ‌تایم:**\n{uptime}\n\n"
                f"👥 **کاربران فعال:** {active_users}")
         kb = {"inline_keyboard": [
-            [{"text": "🔄 تغییر وضعیت سرویس", "callback_data": "admin_toggleservice"}],
+            [{"text": "👥 کاربران", "callback_data": "admin_users"},
+             {"text": "🔄 تغییر وضعیت سرویس", "callback_data": "admin_toggleservice"}],
             [{"text": "🔙 بازگشت", "callback_data": "back_main"}]
         ]}
         send_message(chat_id, msg, reply_markup=kb)
     except Exception as e: send_message(chat_id, f"❌ خطا در دریافت اطلاعات: {e}")
+
+def list_users(chat_id):
+    data = load_sessions()
+    if not data:
+        send_message(chat_id, "ℹ️ هنوز هیچ کاربری با ربات تعامل نداشته است.")
+        return
+    lines = ["👥 **لیست کاربران**\n"]
+    for key, val in data.items():
+        sub = val.get("subscription", "پایه")
+        lines.append(f"🆔 `{key}` — {sub}")
+    send_message(chat_id, "\n".join(lines))
 
 # ═══════════════════════ مدیریت پیام و Callback ═══════════════════════
 def handle_message(chat_id, text):
@@ -2023,9 +2085,12 @@ def handle_message(chat_id, text):
     text = text.strip()
 
     if is_user_banned(chat_id):
-        remaining = int(user_ban_until[chat_id] - time.time()) if chat_id in user_ban_until else 0
-        send_message(chat_id, f"🚫 شما به دلیل اسپم {remaining} ثانیه محروم هستید.")
-        return
+        remaining = int(user_ban_until.get(chat_id, 0) - time.time())
+        if chat_id in admin_bans and admin_bans[chat_id] == 9999999999:
+            remaining = 0
+        if remaining > 0 or (chat_id in admin_bans and admin_bans[chat_id] == 9999999999):
+            send_message(chat_id, "🚫 شما تحریم هستید.")
+            return
 
     if text == "/kill":
         if not session.is_admin and session.subscription == "پایه":
@@ -2050,6 +2115,33 @@ def handle_message(chat_id, text):
         return
 
     if session.is_admin:
+        if text.startswith("/ban"):
+            parts = text.split()
+            if len(parts) >= 2:
+                try:
+                    target = int(parts[1])
+                    minutes = None
+                    if len(parts) >= 3 and parts[2].lower() != "forever":
+                        minutes = int(parts[2])
+                    ban_user(target, minutes)
+                    send_message(chat_id, f"✅ کاربر {target} تحریم شد.")
+                except: send_message(chat_id, "❌ فرمت: /ban <آیدی> [مدت به دقیقه]")
+            else: send_message(chat_id, "❌ فرمت: /ban <آیدی> [مدت به دقیقه]")
+            return
+        if text.startswith("/unban"):
+            parts = text.split()
+            if len(parts) == 2:
+                try:
+                    target = int(parts[1])
+                    if unban_user(target):
+                        with flood_lock:
+                            user_ban_until.pop(target, None)
+                        send_message(chat_id, f"✅ کاربر {target} از تحریم خارج شد.")
+                    else:
+                        send_message(chat_id, "⛔ کاربر در لیست تحریم‌ها یافت نشد.")
+                except: send_message(chat_id, "❌ فرمت: /unban <آیدی>")
+            else: send_message(chat_id, "❌ فرمت: /unban <آیدی>")
+            return
         if text.startswith("/addcode "):
             parts = text.split()
             if len(parts) >= 3:
@@ -2232,6 +2324,20 @@ def handle_callback(cq):
             answer_callback_query(cid, "🚫 اسپم. ۱۵ دقیقه محروم.", show_alert=True)
             return
 
+    if data == "menu_help":
+        help_text = (
+            "📖 **راهنمای عمومی**\n\n"
+            "🧭 **مرورگر:** لینک بده، صفحه رو ببین، لینک‌ها و ویدیوهاش رو استخراج کن.\n"
+            "📸 **شات:** لینک بده، از صفحه عکس بگیر.\n"
+            "📥 **دانلود:** لینک فایل مستقیم یا صفحه بده، برات دانلود کنه.\n"
+            "🎬 **ضبط:** لینک صفحه بده، ازش فیلم بگیره.\n"
+            "🔎 **کاوشگر:** (طلایی/الماسی) توی مرورگر سایت رو باز کن، فیلدهای متن رو پیدا کن و باهاشون جستجو کن.\n"
+            "⚙️ **تنظیمات:** زمان ضبط، کیفیت، نحوه دانلود و ... رو تغییر بده.\n"
+            "💡 برای تهیه اشتراک با @MrHadi3 تماس بگیر."
+        )
+        send_message(chat_id, help_text)
+        return
+
     if data == "free_info":
         info_text = (
             "👋 این ربات ابزارهای متنوعی برای مرور، اسکرین‌شات، دانلود و ضبط صفحات وب ارائه می‌دهد.\n"
@@ -2295,8 +2401,11 @@ def handle_callback(cq):
             answer_callback_query(cid, f"سرویس {status} شد.")
             admin_panel(chat_id)
         else: answer_callback_query(cid, "دسترسی غیرمجاز")
+    elif data == "admin_users":
+        if session.is_admin: list_users(chat_id)
+        else: answer_callback_query(cid, "دسترسی غیرمجاز")
 
-    elif data in ("set_dlmode", "set_brwmode", "set_deep", "set_recbeh", "set_audio", "set_vfmt", "set_incognito", "set_viddel", "set_resolution"):
+    elif data in ("set_dlmode", "set_brwmode", "set_deep", "set_recbeh", "set_vfmt", "set_incognito", "set_viddel", "set_resolution"):
         _settings_toggle(chat_id, session, data, cid)
     elif data == "set_rec":
         session.state = "waiting_record_time"; set_session(session);
@@ -2376,6 +2485,12 @@ def handle_callback(cq):
                 enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="download_website", url=session.browser_url))
             else: answer_callback_query(cid, "🛑 صف پر است.")
 
+    elif data.startswith("intscan_"):
+        if session.browser_url:
+            if session.is_admin or count_user_jobs(chat_id) < 2:
+                enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="interactive_scan", url=session.browser_url))
+            else: answer_callback_query(cid, "🛑 صف پر است.")
+
     elif data.startswith("bpg_"):
         parts = data.split("_")
         if len(parts) == 3:
@@ -2421,7 +2536,6 @@ def _settings_toggle(chat_id, session, data, cid):
     elif data == "set_brwmode": modes = ["text", "media", "explorer"]; idx = modes.index(session.settings.browser_mode); session.settings.browser_mode = modes[(idx+1)%3]
     elif data == "set_deep": session.settings.deep_scan_mode = "everything" if session.settings.deep_scan_mode == "logical" else "logical"
     elif data == "set_recbeh": behaviors = ["click", "scroll", "live"]; idx = behaviors.index(session.settings.record_behavior); session.settings.record_behavior = behaviors[(idx+1)%3]
-    elif data == "set_audio": session.settings.audio_enabled = not session.settings.audio_enabled
     elif data == "set_vfmt": formats = ["webm", "mkv", "mp4"]; idx = formats.index(session.settings.video_format); session.settings.video_format = formats[(idx+1)%3]
     elif data == "set_incognito": session.settings.incognito_mode = not session.settings.incognito_mode
     elif data == "set_viddel": session.settings.video_delivery = "zip" if session.settings.video_delivery == "split" else "split"
@@ -2458,6 +2572,8 @@ def polling_loop(stop_event):
 def main():
     os.makedirs("jobs_data", exist_ok=True)
     init_subscriptions_from_backup()
+    global admin_bans
+    admin_bans = load_bans()
     stop_event = threading.Event()
     # شروع دو کارگر عمومی
     for i in range(2):
@@ -2466,7 +2582,7 @@ def main():
     threading.Thread(target=worker_loop, args=(2, stop_event, "record"), daemon=True).start()
     # شروع polling
     threading.Thread(target=polling_loop, args=(stop_event,), daemon=True).start()
-    safe_print("✅ Bot23 Stable اجرا شد")
+    safe_print("✅ Bot24 Pro اجرا شد")
     try:
         while True: time.sleep(1)
     except KeyboardInterrupt: stop_event.set()
