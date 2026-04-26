@@ -1654,14 +1654,17 @@ def handle_interactive_execute(job):
         time.sleep(1)
 
         if target.get("submitBtn"):
-            page.evaluate(f"""() => {{
-                const btns = document.querySelectorAll('button, input[type="submit"], [role="button"]');
-                for (const b of btns) {{
-                    if (b.textContent.trim() === '{target["submitBtn"]["text"].replace("'", "\\'")}') {{
-                        b.click(); return;
-                    }}
-                }}
-            }}""")
+        	escaped_text = user_text.replace("\\", "\\\\").replace("'", "\\'")
+        	page.evaluate(f"""() => {{
+    const el = document.querySelector('{target["selector"]}') || document.querySelector('input[type="text"], textarea');
+    if (el) {{
+        el.focus();
+        el.value = '';
+        el.value = '{escaped_text}';
+        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+    }}
+}}""")
         else:
             page.keyboard.press("Enter")
 
