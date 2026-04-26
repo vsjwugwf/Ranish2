@@ -2485,8 +2485,12 @@ def main():
     os.makedirs("jobs_data", exist_ok=True)
     init_subscriptions_from_backup()  # بارگذاری کدها از پشتیبان
     stop_event = threading.Event()
-    for i in range(3):
+    # شروع دو کارگر عمومی
+    for i in range(2):
         threading.Thread(target=worker_loop, args=(i, stop_event, "general"), daemon=True).start()
+    # شروع یک کارگر ضبط
+    threading.Thread(target=worker_loop, args=(2, stop_event, "record"), daemon=True).start()
+    # شروع polling
     threading.Thread(target=polling_loop, args=(stop_event,), daemon=True).start()
     safe_print("✅ Bot23 Stable اجرا شد")
     try:
