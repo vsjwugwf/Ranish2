@@ -28,81 +28,53 @@ ZIP_PART_SIZE = int(19 * 1024 * 1024)       # 19MB
 
 ADMIN_CHAT_ID = 46829437
 
-# مسیر پشتیبان کدهای اشتراک
 CODES_BACKUP_FILE = "codes_backup.json"
 
 # ═══════════════════════ سطوح اشتراک ═══════════════════════
 PLAN_LIMITS = {
     "پایه": {
-        "browser": (3, 3600, None),
-        "screenshot": (3, 3600, None),
-        "2x_screenshot": (0, 3600, None),
-        "4k_screenshot": (0, 3600, None),
-        "download": (1, 3600, 20 * 1024 * 1024),
-        "record_video": (0, 3600, None),
-        "scan_downloads": (0, 3600, None),
-        "scan_videos": (0, 3600, None),
-        "download_website": (0, 3600, None),
-        "extract_commands": (0, 3600, None),
-        "interactive_scan": (0, 3600, None),
-        "fullpage_screenshot": (0, 3600, None),
+        "browser": (3, 3600, None), "screenshot": (3, 3600, None),
+        "2x_screenshot": (0, 3600, None), "4k_screenshot": (0, 3600, None),
+        "download": (1, 3600, 20 * 1024 * 1024), "record_video": (0, 3600, None),
+        "scan_downloads": (0, 3600, None), "scan_videos": (0, 3600, None),
+        "download_website": (0, 3600, None), "extract_commands": (0, 3600, None),
+        "interactive_scan": (0, 3600, None), "fullpage_screenshot": (0, 3600, None),
     },
     "نقره‌ای": {
-        "browser": (5, 3600, None),
-        "screenshot": (5, 3600, None),
-        "2x_screenshot": (1, 3600, None),
-        "4k_screenshot": (0, 3600, None),
-        "download": (3, 3600, 100 * 1024 * 1024),
-        "record_video": (2, 3600, None),
-        "scan_downloads": (1, 3600, None),
-        "scan_videos": (1, 3600, None),
-        "download_website": (0, 3600, None),
-        "extract_commands": (1, 3600, None),
-        "interactive_scan": (1, 3600, None),
-        "fullpage_screenshot": (1, 3600, None),
+        "browser": (5, 3600, None), "screenshot": (5, 3600, None),
+        "2x_screenshot": (1, 3600, None), "4k_screenshot": (0, 3600, None),
+        "download": (3, 3600, 100 * 1024 * 1024), "record_video": (2, 3600, None),
+        "scan_downloads": (1, 3600, None), "scan_videos": (1, 3600, None),
+        "download_website": (0, 3600, None), "extract_commands": (1, 3600, None),
+        "interactive_scan": (1, 3600, None), "fullpage_screenshot": (1, 3600, None),
     },
     "طلایی": {
-        "browser": (15, 3600, None),
-        "screenshot": (15, 3600, None),
-        "2x_screenshot": (5, 3600, None),
-        "4k_screenshot": (0, 3600, None),
-        "download": (10, 3600, 600 * 1024 * 1024),
-        "record_video": (8, 3600, None),
-        "scan_downloads": (5, 3600, None),
-        "scan_videos": (8, 3600, None),
-        "download_website": (2, 3600, None),
-        "extract_commands": (5, 3600, None),
-        "interactive_scan": (5, 3600, None),
-        "fullpage_screenshot": (5, 3600, None),
+        "browser": (15, 3600, None), "screenshot": (15, 3600, None),
+        "2x_screenshot": (5, 3600, None), "4k_screenshot": (0, 3600, None),
+        "download": (10, 3600, 600 * 1024 * 1024), "record_video": (8, 3600, None),
+        "scan_downloads": (5, 3600, None), "scan_videos": (8, 3600, None),
+        "download_website": (2, 3600, None), "extract_commands": (5, 3600, None),
+        "interactive_scan": (5, 3600, None), "fullpage_screenshot": (5, 3600, None),
     },
     "الماسی": {
-        "browser": (30, 3600, None),
-        "screenshot": (30, 3600, None),
-        "2x_screenshot": (20, 3600, None),
-        "4k_screenshot": (5, 3600, None),
-        "download": (20, 3600, 2 * 1024 * 1024 * 1024),
-        "record_video": (12, 3600, None),
-        "scan_downloads": (15, 3600, None),
-        "scan_videos": (20, 3600, None),
-        "download_website": (5, 86400, None),
-        "extract_commands": (20, 3600, None),
-        "interactive_scan": (20, 3600, None),
-        "fullpage_screenshot": (20, 3600, None),
+        "browser": (30, 3600, None), "screenshot": (30, 3600, None),
+        "2x_screenshot": (20, 3600, None), "4k_screenshot": (5, 3600, None),
+        "download": (20, 3600, 2 * 1024 * 1024 * 1024), "record_video": (12, 3600, None),
+        "scan_downloads": (15, 3600, None), "scan_videos": (20, 3600, None),
+        "download_website": (5, 86400, None), "extract_commands": (20, 3600, None),
+        "interactive_scan": (20, 3600, None), "fullpage_screenshot": (20, 3600, None),
     },
 }
 
-# رزولوشن‌های مجاز
 ALLOWED_RESOLUTIONS = {
-    "480p":  (854, 480),
-    "720p":  (1280, 720),
-    "1080p": (1920, 1080),
-    "4k":    (3840, 2160),
+    "480p": (854, 480), "720p": (1280, 720),
+    "1080p": (1920, 1080), "4k": (3840, 2160),
 }
 RES_REQUIREMENTS = {
-    "480p":  ["پایه", "نقره‌ای", "طلایی", "الماسی"],
-    "720p":  ["نقره‌ای", "طلایی", "الماسی"],
+    "480p": ["پایه", "نقره‌ای", "طلایی", "الماسی"],
+    "720p": ["نقره‌ای", "طلایی", "الماسی"],
     "1080p": ["طلایی", "الماسی"],
-    "4k":    ["الماسی"],
+    "4k": ["الماسی"],
 }
 MAX_4K_RECORD_MINUTES = 5
 
@@ -138,7 +110,7 @@ class UserSettings:
     browser_mode: str = "text"
     deep_scan_mode: str = "logical"
     record_behavior: str = "click"
-    audio_enabled: bool = False          # فعلاً غیرفعال
+    audio_enabled: bool = False
     video_format: str = "webm"
     incognito_mode: bool = False
     video_delivery: str = "split"
@@ -183,7 +155,7 @@ class WorkerInfo:
     worker_id: int
     current_job_id: Optional[str] = None
     status: str = "idle"
-    worker_type: str = "general"   # همه کارها توسط general انجام می‌شه
+    worker_type: str = "general"
 
 # ═══════════════════════ مدیریت اشتراک (با پشتیبان‌گیری) ═══════════════════════
 SUBSCRIPTIONS_FILE = "subscriptions.json"
@@ -234,7 +206,7 @@ def activate_subscription(chat_id: int, code: str) -> Optional[str]:
     set_user_subscription(chat_id, info["plan"])
     return info["plan"]
 
-# ═══════════════════════ پشتیبان‌گیری از کدها (دائمی‌سازی) ═══════════════════════
+# ═══════════════════════ پشتیبان‌گیری کدها ═══════════════════════
 def git_push_backup():
     try:
         subprocess.run(["git", "config", "user.name", "Bot23"], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -484,7 +456,7 @@ def settings_keyboard(settings: UserSettings, subscription: str):
     mode = {"text": "📄 متن", "media": "🎬 مدیا", "explorer": "🔍 جستجوگر"}[settings.browser_mode]
     deep = "🧠 منطقی" if settings.deep_scan_mode == "logical" else "🗑 همه چیز"
     rec_behavior = {"click": "🖱️ کلیک", "scroll": "📜 اسکرول", "live": "🎭 لایو"}[settings.record_behavior]
-    audio = "🔇 بی‌صدا"  # فعلاً صدا نداریم
+    audio = "🔇 بی‌صدا"
     vfmt = settings.video_format.upper()
     incognito = "🕶️ ناشناس" if settings.incognito_mode else "👤 عادی"
     delivery = "ZIP 📦" if settings.video_delivery == "zip" else "تکه‌ای 🧩"
@@ -535,7 +507,7 @@ BLOCKED_AD_KEYWORDS = [
 
 def get_or_create_context(chat_id, incognito=False):
     global _global_playwright, _global_browser
-    ctx_key = f"{chat_id}{'_incognito' if incognito else ''}"  # ★ این خط جا افتاده بود
+    ctx_key = f"{chat_id}{'_incognito' if incognito else ''}"
     with browser_contexts_lock:
         existing = browser_contexts.get(ctx_key)
         if existing and time.time() - existing["last_used"] < 600 and not incognito:
@@ -990,7 +962,8 @@ def _finish_website_download(job, job_dir):
     job.status = "done"; update_job(job)
     shutil.rmtree(job_dir, ignore_errors=True)
 
-# ═══════════════════════ اینجا پارت اول به پایان می‌رسد. ادامه (صف، Workerها، دانلود، ضبط، کاوشگر، شات کامل، مدیریت پیام و حلقه اصلی) در پارت دوم ارائه خواهد شد. ═══════════════════════
+# ═══════════════════════ ادامه در پارت دوم... ═══════════════════════
+
 # ═══════════════════════ صف و Workerها ═══════════════════════
 QUEUE_FILE = "queue.json"
 def load_queue():
@@ -1088,7 +1061,6 @@ def set_worker_idle(wid):
                 w["status"] = "idle"; w["current_job_id"] = None
         save_workers(wlist)
 
-# صف جداگانه برای ضبط (اختیاری، ولی برای نظم)
 RECORD_QUEUE_FILE = "record_queue.json"
 def load_record_queue():
     try:
@@ -1640,12 +1612,13 @@ def handle_interactive_execute(job):
         page.goto(url, timeout=60000, wait_until="domcontentloaded")
         page.wait_for_timeout(2000)
 
+        escaped_text = user_text.replace("\\", "\\\\").replace("'", "\\'")
         page.evaluate(f"""() => {{
             const el = document.querySelector('{target["selector"]}') || document.querySelector('input[type="text"], textarea');
             if (el) {{
                 el.focus();
                 el.value = '';
-                el.value = '{user_text.replace("'", "\\'")}';
+                el.value = '{escaped_text}';
                 el.dispatchEvent(new Event('input', {{ bubbles: true }}));
                 el.dispatchEvent(new Event('change', {{ bubbles: true }}));
             }}
@@ -1654,17 +1627,15 @@ def handle_interactive_execute(job):
         time.sleep(1)
 
         if target.get("submitBtn"):
-        	escaped_text = user_text.replace("\\", "\\\\").replace("'", "\\'")
-        	page.evaluate(f"""() => {{
-    const el = document.querySelector('{target["selector"]}') || document.querySelector('input[type="text"], textarea');
-    if (el) {{
-        el.focus();
-        el.value = '';
-        el.value = '{escaped_text}';
-        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-    }}
-}}""")
+            btn_text_escaped = target["submitBtn"]["text"].replace("\\", "\\\\").replace("'", "\\'")
+            page.evaluate(f"""() => {{
+                const btns = document.querySelectorAll('button, input[type="submit"], [role="button"]');
+                for (const b of btns) {{
+                    if (b.textContent.trim() === '{btn_text_escaped}') {{
+                        b.click(); return;
+                    }}
+                }}
+            }}""")
         else:
             page.keyboard.press("Enter")
 
@@ -2450,7 +2421,7 @@ def _settings_toggle(chat_id, session, data, cid):
     elif data == "set_brwmode": modes = ["text", "media", "explorer"]; idx = modes.index(session.settings.browser_mode); session.settings.browser_mode = modes[(idx+1)%3]
     elif data == "set_deep": session.settings.deep_scan_mode = "everything" if session.settings.deep_scan_mode == "logical" else "logical"
     elif data == "set_recbeh": behaviors = ["click", "scroll", "live"]; idx = behaviors.index(session.settings.record_behavior); session.settings.record_behavior = behaviors[(idx+1)%3]
-    elif data == "set_audio": session.settings.audio_enabled = not session.settings.audio_enabled  # فعلاً بی‌صدا
+    elif data == "set_audio": session.settings.audio_enabled = not session.settings.audio_enabled
     elif data == "set_vfmt": formats = ["webm", "mkv", "mp4"]; idx = formats.index(session.settings.video_format); session.settings.video_format = formats[(idx+1)%3]
     elif data == "set_incognito": session.settings.incognito_mode = not session.settings.incognito_mode
     elif data == "set_viddel": session.settings.video_delivery = "zip" if session.settings.video_delivery == "split" else "split"
@@ -2486,7 +2457,7 @@ def polling_loop(stop_event):
 
 def main():
     os.makedirs("jobs_data", exist_ok=True)
-    init_subscriptions_from_backup()  # بارگذاری کدها از پشتیبان
+    init_subscriptions_from_backup()
     stop_event = threading.Event()
     # شروع دو کارگر عمومی
     for i in range(2):
