@@ -535,7 +535,7 @@ BLOCKED_AD_KEYWORDS = [
 
 def get_or_create_context(chat_id, incognito=False):
     global _global_playwright, _global_browser
-    ctx_key = f"{chat_id}{'_incognito' if incognito else ''}"
+    ctx_key = f"{chat_id}{'_incognito' if incognito else ''}"  # ★ این خط جا افتاده بود
     with browser_contexts_lock:
         existing = browser_contexts.get(ctx_key)
         if existing and time.time() - existing["last_used"] < 600 and not incognito:
@@ -547,7 +547,7 @@ def get_or_create_context(chat_id, incognito=False):
         if _global_browser is None:
             _global_playwright = sync_playwright().start()
             _global_browser = _global_playwright.chromium.launch(
-                headless=False if os.environ.get("DISPLAY") else True,
+                headless=True,
                 args=[
                     "--no-sandbox", "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage", "--disable-gpu",
