@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Bot25 Crash‑Proof — سه صف مجزا (مرورگر، دانلود، ضبط)
-Worker‌های مجزا با timeout ضد قفل
-تمامی قابلیت‌های Bot24 (اشتراک، آنبن، راهنما، پنل) حفظ شده.
+Bot27 Crash‑Proof Audio Edition
+راه‌حل ضبط صدای واقعی با PulseAudio + Firefox + move-sink-input
+معماری سه‌صفه ضد قفل، Auto‑Close مرورگر، دستور /stop، راهنمای حرفه‌ای
 """
 
 import os, sys, json, time, math, queue, shutil, zipfile, uuid, re, hashlib
@@ -25,12 +25,17 @@ if not BALE_BOT_TOKEN:
 BALE_API_URL = "https://tapi.bale.ai/bot" + BALE_BOT_TOKEN
 REQUEST_TIMEOUT = 30
 LONG_POLL_TIMEOUT = 50
-ZIP_PART_SIZE = int(19 * 1024 * 1024)
+ZIP_PART_SIZE = int(19 * 1024 * 1024)       # 19MB
+
 ADMIN_CHAT_ID = 46829437
 
 CODES_BACKUP_FILE = "codes_backup.json"
 BANS_FILE = "bans.json"
-WORKER_TIMEOUT = 300
+
+WORKER_TIMEOUT = 300                     # حداکثر زمان کلی یک Job (۵ دقیقه)
+BROWSER_AUTO_CLOSE_SECONDS = 1200        # ۲۰ دقیقه برای Jobهای مرورگر
+MAX_RECORD_MINUTES_ADMIN = 60            # حداکثر دقیقه برای ادمین
+MAX_RECORD_MINUTES_USER = 15             # حداکثر دقیقه برای کاربران عادی
 
 # ═══════════════ سطوح اشتراک ═══════════════
 PLAN_LIMITS = {
@@ -80,11 +85,10 @@ RES_REQUIREMENTS = {
 }
 MAX_4K_RECORD_MINUTES = 5
 
-# ═══════════════ قفل‌ها ═══════════════
+# ═══════════════ قفل‌های همزمانی ═══════════════
 print_lock = threading.Lock()
 callback_map: Dict[str, str] = {}
 callback_map_lock = threading.Lock()
-browser_contexts_lock = threading.Lock()
 flood_lock = threading.Lock()
 user_flood_data: Dict[int, List[float]] = {}
 user_ban_until: Dict[int, float] = {}
@@ -106,15 +110,15 @@ def safe_print(*args, **kwargs):
     with print_lock:
         print(*args, **kwargs, flush=True)
 
-# ═══════════════ مدل‌ها ═══════════════
+# ═══════════════ مدل‌های داده ═══════════════
 @dataclass
 class UserSettings:
-    record_time: int = 20
+    record_time: int = 20          # به دقیقه
     default_download_mode: str = "store"
     browser_mode: str = "text"
     deep_scan_mode: str = "logical"
     record_behavior: str = "click"
-    audio_enabled: bool = False
+    audio_enabled: bool = False    # ضبط صدا فعال؟
     video_format: str = "webm"
     incognito_mode: bool = False
     video_delivery: str = "split"
@@ -140,6 +144,7 @@ class SessionState:
     found_downloads_page: int = 0
     last_settings_msg_id: Optional[str] = None
     interactive_elements: Optional[List[Dict[str, Any]]] = None
+    stop_requested: bool = False      # برای /stop
 
 @dataclass
 class Job:
@@ -153,7 +158,8 @@ class Job:
     error_message: Optional[str] = None
     extra: Optional[Dict[str, Any]] = None
     started_at: Optional[float] = None
-    queue_type: str = "browser"
+    queue_type: str = "browser"    # "browser", "download", "record"
+    stop_flag: bool = False        # برای توقف زودهنگام
 
 # ═══════════════ تحریم‌ها ═══════════════
 def load_bans():
@@ -173,7 +179,7 @@ def ban_user(chat_id: int, minutes: Optional[int] = None):
     now = time.time()
     with flood_lock:
         if minutes is None:
-            admin_bans[chat_id] = 9999999999
+            admin_bans[chat_id] = 9999999999  # ابد
         else:
             admin_bans[chat_id] = now + minutes * 60
         save_bans(admin_bans)
@@ -248,9 +254,10 @@ def activate_subscription(chat_id: int, code: str) -> Optional[str]:
     set_user_subscription(chat_id, info["plan"])
     return info["plan"]
 
+# ═══════════════ پشتیبان‌گیری از کدها (با git push) ═══════════════
 def git_push_backup():
     try:
-        subprocess.run(["git", "config", "user.name", "Bot25"], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(["git", "config", "user.name", "Bot27"], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         subprocess.run(["git", "config", "user.email", "bot@local"], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         subprocess.run(["git", "add", CODES_BACKUP_FILE], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
         subprocess.run(["git", "commit", "-m", "Update codes backup"], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
@@ -386,7 +393,7 @@ def check_flood(chat_id: int) -> bool:
             return False
         return True
 
-# ═══════════════ نشست‌ها ═══════════════
+# ═══════════════ نشست‌ها (Settings ذخیره دائمی دارند) ═══════════════
 SESSIONS_FILE = "sessions.json"
 def load_sessions():
     try:
@@ -476,22 +483,24 @@ def main_menu_keyboard(is_admin=False):
     return {"inline_keyboard": base}
 
 def settings_keyboard(settings: UserSettings, subscription: str):
-    rec = settings.record_time
+    rec = settings.record_time                    # به دقیقه
     dlm = "سریع ⚡" if settings.default_download_mode == "stream" else "عادی 💾"
     mode = {"text": "📄 متن", "media": "🎬 مدیا", "explorer": "🔍 جستجوگر"}[settings.browser_mode]
     deep = "🧠 منطقی" if settings.deep_scan_mode == "logical" else "🗑 همه چیز"
     rec_behavior = {"click": "🖱️ کلیک", "scroll": "📜 اسکرول", "live": "🎭 لایو"}[settings.record_behavior]
+    audio = "🔊 با صدا" if settings.audio_enabled else "🔇 بی‌صدا"
     vfmt = settings.video_format.upper()
     incognito = "🕶️ ناشناس" if settings.incognito_mode else "👤 عادی"
     delivery = "ZIP 📦" if settings.video_delivery == "zip" else "تکه‌ای 🧩"
     res = settings.video_resolution
 
     kb = [
-        [{"text": f"⏱️ زمان: {rec}s", "callback_data": "set_rec"}],
+        [{"text": f"⏱️ زمان: {rec}m", "callback_data": "set_rec"}],
         [{"text": f"📥 دانلود: {dlm}", "callback_data": "set_dlmode"}],
         [{"text": f"🌐 حالت: {mode}", "callback_data": "set_brwmode"}],
         [{"text": f"🔍 جستجو: {deep}", "callback_data": "set_deep"}],
         [{"text": f"🎬 رفتار: {rec_behavior}", "callback_data": "set_recbeh"}],
+        [{"text": audio, "callback_data": "set_audio"}],
         [{"text": f"🎞️ فرمت: {vfmt}", "callback_data": "set_vfmt"}],
         [{"text": incognito, "callback_data": "set_incognito"}],
         [{"text": f"📦 ارسال: {delivery}", "callback_data": "set_viddel"}],
@@ -500,267 +509,7 @@ def settings_keyboard(settings: UserSettings, subscription: str):
     ]
     return {"inline_keyboard": kb}
 
-# ═══════════════ Playwright (کروم + فایرفاکس) ═══════════════
-_global_playwright = None
-_global_browser = None
-browser_contexts = {}
-
-try:
-    from playwright_stealth import Stealth
-    HAS_STEALTH = True
-except ImportError:
-    HAS_STEALTH = False
-
-AD_DOMAINS = [
-    "doubleclick.net", "googleadsyndication.com", "adservice.google.com",
-    "adsrvr.org", "outbrain.com", "taboola.com", "exoclick.com",
-    "trafficfactory.biz", "propellerads.com", "adnxs.com", "criteo.com",
-    "moatads.com", "amazon-adsystem.com", "pubmatic.com", "openx.net",
-    "rubiconproject.com", "sovrn.com", "indexww.com", "contextweb.com",
-    "advertising.com", "zedo.com", "adzerk.net", "carbonads.com",
-    "buysellads.com", "popads.net", "trafficstars.com", "trafficjunky.com",
-    "eroadvertising.com", "juicyads.com", "plugrush.com",
-    "txxx.com", "fuckbook.com", "traffic-force.com", "bongacams.com",
-    "trafficjunky.net", "adtng.com"
-]
-BLOCKED_AD_KEYWORDS = [
-    "ads", "advert", "popunder", "banner", "doubleclick", "taboola",
-    "outbrain", "popcash", "traffic", "monetize", "adx", "adserving"
-]
-
-def get_or_create_context(chat_id, incognito=False):
-    global _global_playwright, _global_browser
-    ctx_key = f"{chat_id}{'_incognito' if incognito else ''}"
-    with browser_contexts_lock:
-        existing = browser_contexts.get(ctx_key)
-        if existing and time.time() - existing["last_used"] < 600 and not incognito:
-            existing["last_used"] = time.time()
-            return existing["context"]
-        if existing:
-            try: existing["context"].close()
-            except: pass
-        if _global_browser is None:
-            _global_playwright = sync_playwright().start()
-            _global_browser = _global_playwright.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox", "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage", "--disable-gpu",
-                    "--disable-blink-features=AutomationControlled",
-                    "--autoplay-policy=no-user-gesture-required",
-                ]
-            )
-        vw = random.choice([412, 390, 414])
-        vh = random.choice([915, 844, 896])
-        context = _global_browser.new_context(viewport={"width": vw, "height": vh})
-        if incognito: context.clear_cookies()
-        def handle_popup(page):
-            try:
-                url = page.url.lower()
-                if any(kw in url for kw in BLOCKED_AD_KEYWORDS) or \
-                   any(ad in url for ad in AD_DOMAINS): page.close()
-            except: pass
-        context.on("page", handle_popup)
-        if HAS_STEALTH:
-            page = context.new_page()
-            try: Stealth().apply_stealth(page)
-            except: pass
-            finally: page.close()
-        browser_contexts[ctx_key] = {"context": context, "last_used": time.time()}
-        return context
-
-def close_user_context(chat_id, incognito=False):
-    ctx_key = f"{chat_id}{'_incognito' if incognito else ''}"
-    with browser_contexts_lock:
-        ctx = browser_contexts.pop(ctx_key, None)
-    if ctx:
-        try: ctx["context"].close()
-        except: pass
-
-# ═══════════════ استخراج المان‌ها ═══════════════
-def extract_clickable_and_media(page, mode="text"):
-    if mode == "text":
-        raw = page.evaluate("""() => {
-            const items = []; const seen = new Set();
-            function isVisible(el) {
-                const s = window.getComputedStyle(el);
-                return s.display !== 'none' && s.visibility !== 'hidden' && el.offsetWidth > 0;
-            }
-            document.querySelectorAll('a[href]').forEach(a => {
-                if (!isVisible(a)) return;
-                let t = a.textContent.trim() || 'لینک';
-                let href = a.href;
-                try { href = new URL(a.getAttribute('href'), document.baseURI).href; } catch(e) {}
-                if (!seen.has(href)) { seen.add(href); items.push(['link', t, href]); }
-            });
-            return items;
-        }""")
-        links = [(t, txt, h) for t, txt, h in raw if h.startswith("http")]
-        return links, []
-
-    elif mode == "media":
-        video_sources = page.evaluate("""() => {
-            const vids = [];
-            document.querySelectorAll('video').forEach(v => {
-                let src = v.src || (v.querySelector('source') ? v.querySelector('source').src : '');
-                if (src) vids.push(src);
-            });
-            document.querySelectorAll('iframe').forEach(f => {
-                if (f.src) vids.push(f.src);
-            });
-            return [...new Set(vids)].filter(u => u.startsWith('http'));
-        }""")
-        anchors = page.evaluate("""() => {
-            const a = []; document.querySelectorAll('a[href]').forEach(e => {
-                try { a.push(new URL(e.getAttribute('href'), document.baseURI).href); } catch(e) {}
-            });
-            return a.filter(h => h && h.startsWith('http'));
-        }""")
-        links = [("link", href.split("/")[-1][:20] or "لینک", href) for href in anchors[:20]]
-        return links, video_sources
-
-    else:
-        raw = page.evaluate("""() => {
-            const items = []; const seen = new Set();
-            function add(type, text, href) {
-                if (!href || seen.has(href)) return;
-                seen.add(href); items.push([type, text.trim().substring(0, 40), href]);
-            }
-            function isVisible(el) {
-                const s = window.getComputedStyle(el);
-                return s.display !== 'none' && s.visibility !== 'hidden' && el.offsetWidth > 0;
-            }
-            document.querySelectorAll('a[href]').forEach(a => {
-                let t = a.textContent.trim() || 'لینک';
-                try {
-                    let href = new URL(a.getAttribute('href'), document.baseURI).href;
-                    add('link', t, href);
-                } catch(e) {}
-            });
-            document.querySelectorAll('button').forEach(btn => {
-                if (!isVisible(btn)) return;
-                let t = btn.textContent.trim() || 'دکمه';
-                let formaction = btn.getAttribute('formaction') || '';
-                if (formaction) {
-                    try { formaction = new URL(formaction, document.baseURI).href; } catch(e) {}
-                    add('button', t, formaction);
-                } else {
-                    let onclick = btn.getAttribute('onclick') || '';
-                    let match = onclick.match(/location\\.href=['"]([^'"]+)['"]/) || onclick.match(/window\\.open\\(['"]([^'"]+)['"]\\)/);
-                    if (match) add('button', t, match[1]);
-                }
-            });
-            document.querySelectorAll('[onclick]').forEach(el => {
-                if (el.tagName === 'A' || el.tagName === 'BUTTON') return;
-                if (!isVisible(el)) return;
-                let onclick = el.getAttribute('onclick') || '';
-                let match = onclick.match(/location\\.href=['"]([^'"]+)['"]/) || onclick.match(/window\\.open\\(['"]([^'"]+)['"]\\)/);
-                if (match) add('element', el.textContent.trim().substring(0,30) || 'کلیک', match[1]);
-            });
-            document.querySelectorAll('[role="button"]').forEach(el => {
-                if (!isVisible(el)) return;
-                let t = el.textContent.trim().substring(0,30) || 'نقش';
-                let id = el.id ? '#'+el.id : '';
-                add('role', t, id);
-            });
-            document.querySelectorAll('input[type="submit"], input[type="button"]').forEach(inp => {
-                if (!isVisible(inp)) return;
-                let t = inp.value || 'ارسال';
-                let form = inp.closest('form');
-                let action = form ? form.getAttribute('action') || '' : '';
-                try { if (action) action = new URL(action, document.baseURI).href; } catch(e) {}
-                add('input', t, action || window.location.href);
-            });
-            return items;
-        }""")
-        links = [(t, txt, h) for t, txt, h in raw if h and (h.startswith("http") or h.startswith("/") or h.startswith("#"))]
-        return links, []
-
-# ═══════════════ ابزارهای اسکرول و ویدیو ═══════════════
-def smooth_scroll_to_video(page):
-    coords = page.evaluate("""() => {
-        let best = null; let bestArea = 0;
-        document.querySelectorAll('video').forEach(v => {
-            const rect = v.getBoundingClientRect();
-            if (rect.width < 200 || rect.height < 150) return;
-            const area = rect.width * rect.height;
-            if (area > bestArea) { bestArea = area; best = { y: rect.top + window.scrollY, x: rect.left + window.scrollX, w: rect.width, h: rect.height }; }
-        });
-        document.querySelectorAll('iframe').forEach(f => {
-            const rect = f.getBoundingClientRect();
-            if (rect.width < 300 || rect.height < 200) return;
-            const area = rect.width * rect.height;
-            if (area > bestArea) { bestArea = area; best = { y: rect.top + window.scrollY, x: rect.left + window.scrollX, w: rect.width, h: rect.height }; }
-        });
-        return best || { y: window.scrollY, x: 0, w: 0, h: 0 };
-    }""")
-    target_y = coords["y"]
-    current_y = page.evaluate("window.scrollY")
-    distance = target_y - current_y
-    steps = max(20, abs(distance) // 15)
-    step_size = distance / steps
-    for i in range(steps):
-        current_y += step_size
-        page.evaluate(f"window.scrollTo({{top: {int(current_y)}, behavior: 'smooth'}})")
-        page.wait_for_timeout(50)
-    page.evaluate(f"window.scrollTo({{top: {int(target_y)}, behavior: 'smooth'}})")
-    page.wait_for_timeout(200)
-
-def find_video_center(page):
-    coords = page.evaluate("""() => {
-        const centerX = window.innerWidth / 2;
-        const centerY = window.innerHeight / 2;
-        let best = null; let bestArea = 0;
-        document.querySelectorAll('video').forEach(v => {
-            const rect = v.getBoundingClientRect();
-            if (rect.width < 200 || rect.height < 150) return;
-            const area = rect.width * rect.height;
-            if (area > bestArea) {
-                bestArea = area;
-                best = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-            }
-        });
-        document.querySelectorAll('iframe').forEach(f => {
-            const rect = f.getBoundingClientRect();
-            if (rect.width < 300 || rect.height < 200) return;
-            const area = rect.width * rect.height;
-            if (area > bestArea) {
-                bestArea = area;
-                best = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-            }
-        });
-        return best || { x: centerX, y: centerY };
-    }""")
-    return coords["x"], coords["y"]
-
-# ═══════════════ اسکرین‌شات، فایل، دانلود سایت (همگی کامل) ═══════════════
-def screenshot_full(context, url, out):
-    page = context.new_page()
-    try:
-        page.goto(url, timeout=90000, wait_until="domcontentloaded")
-        page.wait_for_timeout(2000)
-        page.screenshot(path=out, full_page=True)
-    finally: page.close()
-
-def screenshot_2x(context, url, out):
-    page = context.new_page()
-    try:
-        page.goto(url, timeout=90000, wait_until="domcontentloaded")
-        page.wait_for_timeout(2000)
-        page.evaluate("document.body.style.zoom = '200%'")
-        page.wait_for_timeout(500)
-        page.screenshot(path=out, full_page=True)
-    finally: page.close()
-
-def screenshot_4k(context, url, out):
-    page = context.new_page()
-    try:
-        page.set_viewport_size({"width": 3840, "height": 2160})
-        page.goto(url, timeout=90000, wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)
-        page.screenshot(path=out, full_page=True)
-    finally: page.close()
-
+# ═══════════════ ابزارهای فایل ═══════════════
 def is_direct_file_url(url: str) -> bool:
     known_extensions = [
         '.zip','.rar','.7z','.pdf','.mp4','.mkv','.avi','.mp3',
@@ -845,63 +594,7 @@ def create_zip_and_split(src, base):
     os.remove(zp)
     return parts
 
-def download_full_website(job):
-    chat_id = job.chat_id; url = job.url
-    job_dir = os.path.join("jobs_data", job.job_id)
-    os.makedirs(job_dir, exist_ok=True)
-    send_message(chat_id, "🌐 دانلود کامل وب‌سایت...")
-    if shutil.which("wget"):
-        try:
-            ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            cmd = ["wget", "--adjust-extension", "--span-hosts", "--convert-links",
-                   "--page-requisites", "--no-directories", "--directory-prefix", job_dir,
-                   "--recursive", "--level=1", "--accept", "html,css,js,jpg,jpeg,png,gif,svg,mp4,webm,pdf",
-                   "--user-agent", ua, "--header", "Accept: */*", "--timeout", "30", "--tries", "2", url]
-            if subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300).returncode == 0:
-                _finish_website_download(job, job_dir); return
-        except: pass
-    send_message(chat_id, "🔄 دانلود با مرورگر مخفی...")
-    try:
-        ctx = get_or_create_context(chat_id)
-        page = ctx.new_page()
-        page.goto(url, timeout=60000, wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)
-        html = page.content()
-        with open(os.path.join(job_dir, "index.html"), "w", encoding="utf-8") as f: f.write(html)
-        page.screenshot(path=os.path.join(job_dir, "screenshot.png"), full_page=True)
-        page.close()
-        _finish_website_download(job, job_dir)
-    except Exception as e:
-        send_message(chat_id, f"❌ خطا: {e}")
-        job.status = "error"; update_job(job)
-        shutil.rmtree(job_dir, ignore_errors=True)
-
-def _finish_website_download(job, job_dir):
-    chat_id = job.chat_id
-    all_files = []
-    for root, _, files in os.walk(job_dir):
-        for f in files: all_files.append(os.path.join(root, f))
-    if not all_files:
-        send_message(chat_id, "❌ محتوایی یافت نشد.")
-        job.status = "error"; update_job(job); return
-    zp = os.path.join(job_dir, "website.zip")
-    with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
-        for fp in all_files: zf.write(fp, os.path.relpath(fp, job_dir))
-    parts = split_file_binary(zp, "website", ".zip") if os.path.getsize(zp) > ZIP_PART_SIZE else [zp]
-    instr = os.path.join(job_dir, "merge.txt")
-    with open(instr, "w") as f: f.write("همه‌ی فایل‌ها را دانلود کنید، سپس فایل .001 را با WinRAR یا 7-Zip باز کنید.")
-    send_document(chat_id, instr, caption="📝 راهنما")
-    for idx, p in enumerate(parts, 1): send_document(chat_id, p, caption=f"🌐 پارت {idx}/{len(parts)}")
-    job.status = "done"; update_job(job)
-    shutil.rmtree(job_dir, ignore_errors=True)
-
-# ═══════════════ صف‌ها و Workerها ═══════════════
-QUEUE_FILES = {
-    "browser": "browser_queue.json",
-    "download": "download_queue.json",
-    "record": "record_queue.json"
-}
-
+# ═══════════════ صف‌ها (سه‌گانه) ═══════════════
 def load_queue(queue_type: str) -> list:
     try:
         with open(QUEUE_FILES[queue_type], "r") as f:
@@ -977,6 +670,423 @@ def kill_all_user_jobs(chat_id: int):
                 item["updated_at"] = time.time()
         save_queue(qt, q)
 
+# ═══════════════ Utility: اسکرین‌شات (با مرورگر اختصاصی) ═══════════════
+def screenshot_full(job, out):
+    pw = sync_playwright().start()
+    browser = pw.chromium.launch(headless=True)
+    page = browser.new_page()
+    try:
+        page.goto(job.url, timeout=90000, wait_until="domcontentloaded")
+        page.wait_for_timeout(2000)
+        page.screenshot(path=out, full_page=True)
+    finally:
+        page.close()
+        browser.close()
+        pw.stop()
+
+def screenshot_2x(job, out):
+    pw = sync_playwright().start()
+    browser = pw.chromium.launch(headless=True)
+    page = browser.new_page()
+    try:
+        page.goto(job.url, timeout=90000, wait_until="domcontentloaded")
+        page.wait_for_timeout(2000)
+        page.evaluate("document.body.style.zoom = '200%'")
+        page.wait_for_timeout(500)
+        page.screenshot(path=out, full_page=True)
+    finally:
+        page.close()
+        browser.close()
+        pw.stop()
+
+def screenshot_4k(job, out):
+    pw = sync_playwright().start()
+    browser = pw.chromium.launch(headless=True)
+    page = browser.new_page()
+    try:
+        page.set_viewport_size({"width": 3840, "height": 2160})
+        page.goto(job.url, timeout=90000, wait_until="domcontentloaded")
+        page.wait_for_timeout(3000)
+        page.screenshot(path=out, full_page=True)
+    finally:
+        page.close()
+        browser.close()
+        pw.stop()
+
+# ═══════════════ ادامه در پارت دوم... ═══════════════
+# ═══════════════════════ ادامهٔ مستقیم پارت اول — پارت دوم Bot27 ═══════════════════════
+
+def scan_videos_smart(page):
+    elements = page.evaluate("""() => {
+        const results = [];
+        const centerX = window.innerWidth / 2;
+        const centerY = window.innerHeight / 2;
+        document.querySelectorAll('video').forEach(v => {
+            const rect = v.getBoundingClientRect();
+            if (rect.width < 200 || rect.height < 150) return;
+            let src = v.src || (v.querySelector('source') ? v.querySelector('source').src : '');
+            if (!src) return;
+            const area = rect.width * rect.height;
+            const dist = Math.sqrt(Math.pow(rect.x + rect.width/2 - centerX, 2) + Math.pow(rect.y + rect.height/2 - centerY, 2));
+            results.push({text: 'video element', href: src, score: area - dist*2, w: rect.width, h: rect.height});
+        });
+        document.querySelectorAll('iframe').forEach(f => {
+            const rect = f.getBoundingClientRect();
+            if (rect.width < 300 || rect.height < 200) return;
+            let src = f.src || '';
+            if (!src.startsWith('http')) return;
+            const area = rect.width * rect.height;
+            const dist = Math.sqrt(Math.pow(rect.x + rect.width/2 - centerX, 2) + Math.pow(rect.y + rect.height/2 - centerY, 2));
+            results.push({text: 'iframe', href: src, score: area - dist*2, w: rect.width, h: rect.height});
+        });
+        return results;
+    }""")
+
+    network_urls = []
+    def capture(response):
+        ct = response.headers.get("content-type", "")
+        url = response.url.lower()
+        if "mpegurl" in ct or "dash+xml" in ct or url.endswith((".m3u8", ".mpd")) or \
+           ("video" in ct and (url.endswith(".mp4") or url.endswith(".webm") or url.endswith(".mkv"))):
+            network_urls.append(response.url)
+    page.on("response", capture)
+    page.wait_for_timeout(3000)
+    page.remove_listener("response", capture)
+
+    json_urls = page.evaluate("""() => {
+        const results = [];
+        const scripts = document.querySelectorAll('script');
+        for (const s of scripts) {
+            const text = s.textContent || '';
+            const matches = text.match(/(https?:\\/\\/[^"']+\\.(?:m3u8|mp4|mkv|webm|mpd)[^"']*)/gi);
+            if (matches) results.push(...matches);
+        }
+        return results;
+    }""")
+
+    all_candidates = []
+    for el in elements:
+        href = el["href"]
+        if not href.startswith("http"): continue
+        parsed = urlparse(href)
+        if any(ad in parsed.netloc for ad in AD_DOMAINS): continue
+        if any(kw in href.lower() for kw in BLOCKED_AD_KEYWORDS): continue
+        all_candidates.append({
+            "text": (el["text"] + f" ({parsed.netloc})")[:35],
+            "href": href,
+            "score": el["score"]
+        })
+    for url in network_urls:
+        if url in [c["href"] for c in all_candidates]: continue
+        parsed = urlparse(url)
+        if any(ad in parsed.netloc for ad in AD_DOMAINS): continue
+        all_candidates.append({
+            "text": f"Network stream ({parsed.netloc})"[:35],
+            "href": url,
+            "score": 100000
+        })
+    for url in json_urls:
+        if url in [c["href"] for c in all_candidates]: continue
+        parsed = urlparse(url)
+        if any(ad in parsed.netloc for ad in AD_DOMAINS): continue
+        all_candidates.append({
+            "text": f"JSON stream ({parsed.netloc})"[:35],
+            "href": url,
+            "score": 90000
+        })
+    all_candidates.sort(key=lambda x: x["score"], reverse=True)
+    return all_candidates
+
+def smooth_scroll_to_video(page):
+    coords = page.evaluate("""() => {
+        let best = null; let bestArea = 0;
+        document.querySelectorAll('video').forEach(v => {
+            const rect = v.getBoundingClientRect();
+            if (rect.width < 200 || rect.height < 150) return;
+            const area = rect.width * rect.height;
+            if (area > bestArea) { bestArea = area; best = { y: rect.top + window.scrollY, x: rect.left + window.scrollX, w: rect.width, h: rect.height }; }
+        });
+        document.querySelectorAll('iframe').forEach(f => {
+            const rect = f.getBoundingClientRect();
+            if (rect.width < 300 || rect.height < 200) return;
+            const area = rect.width * rect.height;
+            if (area > bestArea) { bestArea = area; best = { y: rect.top + window.scrollY, x: rect.left + window.scrollX, w: rect.width, h: rect.height }; }
+        });
+        return best || { y: window.scrollY, x: 0, w: 0, h: 0 };
+    }""")
+    target_y = coords["y"]
+    current_y = page.evaluate("window.scrollY")
+    distance = target_y - current_y
+    steps = max(20, abs(distance) // 15)
+    step_size = distance / steps
+    for i in range(steps):
+        current_y += step_size
+        page.evaluate(f"window.scrollTo({{top: {int(current_y)}, behavior: 'smooth'}})")
+        page.wait_for_timeout(50)
+    page.evaluate(f"window.scrollTo({{top: {int(target_y)}, behavior: 'smooth'}})")
+    page.wait_for_timeout(200)
+
+def find_video_center(page):
+    coords = page.evaluate("""() => {
+        const centerX = window.innerWidth / 2;
+        const centerY = window.innerHeight / 2;
+        let best = null; let bestArea = 0;
+        document.querySelectorAll('video').forEach(v => {
+            const rect = v.getBoundingClientRect();
+            if (rect.width < 200 || rect.height < 150) return;
+            const area = rect.width * rect.height;
+            if (area > bestArea) {
+                bestArea = area;
+                best = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+            }
+        });
+        document.querySelectorAll('iframe').forEach(f => {
+            const rect = f.getBoundingClientRect();
+            if (rect.width < 300 || rect.height < 200) return;
+            const area = rect.width * rect.height;
+            if (area > bestArea) {
+                bestArea = area;
+                best = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+            }
+        });
+        return best || { x: centerX, y: centerY };
+    }""")
+    return coords["x"], coords["y"]
+
+# ═══════════════════════ اسکرین‌شات ═══════════════════════
+def screenshot_full(browser, url, out):
+    page = browser.new_page()
+    try:
+        page.goto(url, timeout=90000, wait_until="domcontentloaded")
+        page.wait_for_timeout(2000)
+        page.screenshot(path=out, full_page=True)
+    finally:
+        page.close()
+
+def screenshot_2x(browser, url, out):
+    page = browser.new_page()
+    try:
+        page.goto(url, timeout=90000, wait_until="domcontentloaded")
+        page.wait_for_timeout(2000)
+        page.evaluate("document.body.style.zoom = '200%'")
+        page.wait_for_timeout(500)
+        page.screenshot(path=out, full_page=True)
+    finally:
+        page.close()
+
+def screenshot_4k(browser, url, out):
+    page = browser.new_page()
+    try:
+        page.set_viewport_size({"width": 3840, "height": 2160})
+        page.goto(url, timeout=90000, wait_until="domcontentloaded")
+        page.wait_for_timeout(3000)
+        page.screenshot(path=out, full_page=True)
+    finally:
+        page.close()
+
+# ═══════════════════════ ابزارهای فایل ═══════════════════════
+def is_direct_file_url(url: str) -> bool:
+    known_extensions = [
+        '.zip','.rar','.7z','.pdf','.mp4','.mkv','.avi','.mp3',
+        '.exe','.apk','.dmg','.iso','.tar','.gz','.bz2','.xz','.whl',
+        '.deb','.rpm','.msi','.pkg','.appimage','.jar','.war',
+        '.py','.sh','.bat','.run','.bin','.img','.mov','.flv','.wmv',
+        '.webm','.ogg','.wav','.flac','.csv','.docx','.pptx','.m3u8'
+    ]
+    path = urlparse(url).path.lower()
+    if any(path.endswith(ext) for ext in known_extensions): return True
+    filename = path.split('/')[-1]
+    if '.' in filename:
+        ext = filename.rsplit('.', 1)[-1]
+        if ext and re.match(r'^[a-zA-Z0-9_-]+$', ext) and len(ext) <= 10: return True
+    return False
+
+def get_filename_from_url(url):
+    path = unquote(urlparse(url).path)
+    name = os.path.basename(path)
+    return name if name and '.' in name else "downloaded_file"
+
+def crawl_for_download_link(start_url, max_depth=1, max_pages=10, timeout_seconds=30):
+    visited = set()
+    q = queue.Queue(); q.put((start_url, 0))
+    s = requests.Session(); s.headers.update({"User-Agent": "Mozilla/5.0"})
+    pc = 0; start_time = time.time()
+    while not q.empty():
+        if time.time() - start_time > timeout_seconds: break
+        cur, depth = q.get()
+        if cur in visited or depth > max_depth or pc > max_pages: continue
+        visited.add(cur); pc += 1
+        try: r = s.get(cur, timeout=10)
+        except: continue
+        if is_direct_file_url(cur): return cur
+        if "text/html" in r.headers.get("Content-Type", ""):
+            soup = BeautifulSoup(r.text, "html.parser")
+            for a in soup.find_all("a", href=True):
+                href = urljoin(cur, a["href"])
+                if is_direct_file_url(href): return href
+                if depth + 1 <= max_depth: q.put((href, depth+1))
+    return None
+
+def split_file_binary(file_path, prefix, ext):
+    d = os.path.dirname(file_path) or "."
+    if not os.path.exists(file_path): return []
+    video_exts = ('.webm', '.mkv', '.mp4', '.avi', '.mov')
+    parts = []
+    if ext.lower() in video_exts and shutil.which('ffmpeg'):
+        try:
+            out_pattern = os.path.join(d, f"{prefix}_part%03d{ext}")
+            cmd = [
+                'ffmpeg', '-y', '-i', file_path,
+                '-c', 'copy', '-map', '0',
+                '-f', 'segment', '-segment_size', str(ZIP_PART_SIZE),
+                '-reset_timestamps', '1', out_pattern
+            ]
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+            parts = sorted([os.path.join(d, f) for f in os.listdir(d) if f.startswith(f"{prefix}_part") and f.endswith(ext)])
+            if parts: return parts
+        except Exception as e:
+            safe_print(f"ffmpeg segment failed: {e}, falling back to binary split")
+    with open(file_path, "rb") as f:
+        i = 1
+        while True:
+            chunk = f.read(ZIP_PART_SIZE)
+            if not chunk: break
+            pname = f"{prefix}.part{i:03d}{ext}" if ext.lower() != ".zip" else f"{prefix}.zip.{i:03d}"
+            ppath = os.path.join(d, pname)
+            with open(ppath, "wb") as pf: pf.write(chunk)
+            parts.append(ppath); i += 1
+    return parts
+
+def create_zip_and_split(src, base):
+    d = os.path.dirname(src) or "."
+    if not os.path.exists(src): return []
+    zp = os.path.join(d, f"{base}.zip")
+    try:
+        with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(src, os.path.basename(src))
+    except: return []
+    if os.path.getsize(zp) <= ZIP_PART_SIZE: return [zp]
+    parts = split_file_binary(zp, base, ".zip")
+    os.remove(zp)
+    return parts
+
+# ═══════════════════════ دانلود کامل سایت ═══════════════════════
+def download_full_website(job):
+    chat_id = job.chat_id; url = job.url
+    job_dir = os.path.join("jobs_data", job.job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    send_message(chat_id, "🌐 دانلود کامل وب‌سایت...")
+    if shutil.which("wget"):
+        try:
+            ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            cmd = ["wget", "--adjust-extension", "--span-hosts", "--convert-links",
+                   "--page-requisites", "--no-directories", "--directory-prefix", job_dir,
+                   "--recursive", "--level=1", "--accept", "html,css,js,jpg,jpeg,png,gif,svg,mp4,webm,pdf",
+                   "--user-agent", ua, "--header", "Accept: */*", "--timeout", "30", "--tries", "2", url]
+            if subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300).returncode == 0:
+                _finish_website_download(job, job_dir); return
+        except: pass
+    send_message(chat_id, "🔄 دانلود با مرورگر مخفی...")
+    pw = sync_playwright().start(); browser = None
+    try:
+        browser = pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page()
+        page.goto(url, timeout=60000, wait_until="domcontentloaded")
+        page.wait_for_timeout(3000)
+        html = page.content()
+        with open(os.path.join(job_dir, "index.html"), "w", encoding="utf-8") as f: f.write(html)
+        page.screenshot(path=os.path.join(job_dir, "screenshot.png"), full_page=True)
+        page.close()
+        _finish_website_download(job, job_dir)
+    except Exception as e:
+        send_message(chat_id, f"❌ خطا: {e}")
+        job.status = "error"; update_job(job)
+        shutil.rmtree(job_dir, ignore_errors=True)
+    finally:
+        if browser: browser.close()
+        if pw: pw.stop()
+
+def _finish_website_download(job, job_dir):
+    chat_id = job.chat_id
+    all_files = []
+    for root, _, files in os.walk(job_dir):
+        for f in files: all_files.append(os.path.join(root, f))
+    if not all_files:
+        send_message(chat_id, "❌ محتوایی یافت نشد.")
+        job.status = "error"; update_job(job); return
+    zp = os.path.join(job_dir, "website.zip")
+    with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fp in all_files: zf.write(fp, os.path.relpath(fp, job_dir))
+    parts = split_file_binary(zp, "website", ".zip") if os.path.getsize(zp) > ZIP_PART_SIZE else [zp]
+    instr = os.path.join(job_dir, "merge.txt")
+    with open(instr, "w") as f: f.write("همه‌ی فایل‌ها را دانلود کنید، سپس فایل .001 را با WinRAR یا 7-Zip باز کنید.")
+    send_document(chat_id, instr, caption="📝 راهنما")
+    for idx, p in enumerate(parts, 1): send_document(chat_id, p, caption=f"🌐 پارت {idx}/{len(parts)}")
+    job.status = "done"; update_job(job)
+    shutil.rmtree(job_dir, ignore_errors=True)
+
+# ═══════════════════════ صف‌ها و Workerها ═══════════════════════
+def load_queue(queue_type: str) -> list:
+    try:
+        with open(QUEUE_FILES[queue_type], "r") as f: return json.load(f)
+    except: return []
+
+def save_queue(queue_type: str, data: list):
+    tmp = QUEUE_FILES[queue_type] + ".tmp"
+    with open(tmp, "w") as f: json.dump(data, f)
+    os.replace(tmp, QUEUE_FILES[queue_type])
+
+def enqueue_job(job: Job, queue_type: str):
+    q = load_queue(queue_type)
+    q.append(asdict(job))
+    save_queue(queue_type, q)
+
+def dequeue_job(queue_type: str) -> Optional[Job]:
+    q = load_queue(queue_type)
+    for i, item in enumerate(q):
+        if item["status"] == "queued":
+            item["status"] = "running"
+            item["updated_at"] = time.time()
+            item["started_at"] = time.time()
+            save_queue(queue_type, q)
+            return Job(**item)
+    return None
+
+def update_job(job: Job):
+    q = load_queue(job.queue_type)
+    for i, item in enumerate(q):
+        if item["job_id"] == job.job_id:
+            q[i] = asdict(job)
+            save_queue(job.queue_type, q)
+            return
+    q.append(asdict(job))
+    save_queue(job.queue_type, q)
+
+def find_job(jid: str) -> Optional[Job]:
+    for qt in ["browser", "download", "record"]:
+        q = load_queue(qt)
+        for item in q:
+            if item["job_id"] == jid: return Job(**item)
+    return None
+
+def count_user_jobs(chat_id: int):
+    count = 0
+    for qt in ["browser", "download", "record"]:
+        q = load_queue(qt)
+        for item in q:
+            if item["chat_id"] == chat_id and item["status"] in ("queued", "running"):
+                count += 1
+    return count
+
+def kill_all_user_jobs(chat_id: int):
+    for qt in ["browser", "download", "record"]:
+        q = load_queue(qt)
+        for item in q:
+            if item["chat_id"] == chat_id and item["status"] in ("queued", "running"):
+                item["status"] = "cancelled"
+                item["updated_at"] = time.time()
+        save_queue(qt, q)
+
 def worker_loop(worker_id, stop_event, worker_type):
     safe_print(f"[Worker {worker_id} ({worker_type})] start")
     while not stop_event.is_set():
@@ -991,6 +1101,13 @@ def worker_loop(worker_id, stop_event, worker_type):
 
             if not job:
                 time.sleep(2)
+                continue
+
+            # چک کردن توقف زودهنگام
+            session = get_session(job.chat_id)
+            if session.cancel_requested:
+                job.status = "cancelled"; update_job(job)
+                session.cancel_requested = False; set_session(session)
                 continue
 
             def target():
@@ -1018,7 +1135,7 @@ def worker_loop(worker_id, stop_event, worker_type):
             traceback.print_exc()
             time.sleep(5)
 
-# ═══════════════ توابع پردازش Job ═══════════════
+# ═══════════════════════ توابع پردازش Job ═══════════════════════
 def process_browser_job(job: Job):
     chat_id = job.chat_id
     session = get_session(chat_id)
@@ -1068,16 +1185,24 @@ def process_browser_job(job: Job):
     job_dir = os.path.join("jobs_data", job.job_id)
     os.makedirs(job_dir, exist_ok=True)
 
+    # کروم اختصاصی برای این Job
+    pw = sync_playwright().start(); browser = None
     try:
+        browser = pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+                  "--disable-blink-features=AutomationControlled",
+                  "--autoplay-policy=no-user-gesture-required"]
+        )
         if session.cancel_requested: raise InterruptedError("cancel")
+
         if job.mode == "screenshot":
             if not session.is_admin:
                 err = check_rate_limit(chat_id, "screenshot")
                 if err: send_message(chat_id, err); job.status = "cancelled"; update_job(job); return
             send_message(chat_id, "📸 اسکرین‌شات...")
-            ctx = get_or_create_context(chat_id, session.settings.incognito_mode)
             spath = os.path.join(job_dir, "screenshot.png")
-            screenshot_full(ctx, job.url, spath)
+            screenshot_full(browser, job.url, spath)
             send_document(chat_id, spath, caption="✅ اسکرین‌شات (مرحله ۱)")
             if session.subscription in ("طلایی", "الماسی") or session.is_admin:
                 kb = {"inline_keyboard": [
@@ -1091,9 +1216,8 @@ def process_browser_job(job: Job):
                 err = check_rate_limit(chat_id, "2x_screenshot")
                 if err: send_message(chat_id, err); job.status = "cancelled"; update_job(job); return
             send_message(chat_id, "🔍 2x Zoom...")
-            ctx = get_or_create_context(chat_id, session.settings.incognito_mode)
             spath = os.path.join(job_dir, "screenshot_2x.png")
-            screenshot_2x(ctx, job.url, spath)
+            screenshot_2x(browser, job.url, spath)
             send_document(chat_id, spath, caption="✅ اسکرین‌شات 2x")
             job.status = "done"; update_job(job)
         elif job.mode == "4k_screenshot":
@@ -1101,16 +1225,15 @@ def process_browser_job(job: Job):
                 err = check_rate_limit(chat_id, "4k_screenshot")
                 if err: send_message(chat_id, err); job.status = "cancelled"; update_job(job); return
             send_message(chat_id, "🖼️ 4K...")
-            ctx = get_or_create_context(chat_id, session.settings.incognito_mode)
             spath = os.path.join(job_dir, "screenshot_4k.png")
-            screenshot_4k(ctx, job.url, spath)
+            screenshot_4k(browser, job.url, spath)
             send_document(chat_id, spath, caption="✅ اسکرین‌شات 4K")
             job.status = "done"; update_job(job)
         elif job.mode in ("browser", "browser_click"):
             if not session.is_admin:
                 err = check_rate_limit(chat_id, "browser")
                 if err: send_message(chat_id, err); job.status = "cancelled"; update_job(job); return
-            handle_browser(job, job_dir)
+            handle_browser(job, job_dir, browser)
         else:
             send_message(chat_id, "❌ نامعتبر")
             job.status = "error"; update_job(job)
@@ -1121,6 +1244,8 @@ def process_browser_job(job: Job):
         send_message(chat_id, f"❌ خطا: {e}")
         job.status = "error"; update_job(job)
     finally:
+        if browser: browser.close()
+        if pw: pw.stop()
         shutil.rmtree(job_dir, ignore_errors=True)
         final = find_job(job.job_id)
         if final and final.status in ("done","error","cancelled"):
@@ -1170,11 +1295,6 @@ def process_download_job(job: Job):
         job.status = "error"; update_job(job)
     finally:
         shutil.rmtree(job_dir, ignore_errors=True)
-
-# ═══════════════ پایان پارت اول (حدود ۱۰۰۰ خط) ═══════════════
-# ادامهٔ توابع (دانلود، ضبط، مرورگر، کاوشگر، پنل ادمین، مدیریت پیام، main) در پارت دوم ارائه می‌شود.
-
-# ═══════════════════════ ادامهٔ مستقیم پارت اول — پارت دوم ═══════════════════════
 
 # ═══════════════════════ دانلود هوشمند ═══════════════════════
 def handle_download(job, job_dir):
@@ -1308,6 +1428,7 @@ def handle_blind_download(job):
         job.status = "error"; update_job(job)
         shutil.rmtree(job_dir, ignore_errors=True)
 
+# ═══════════════════════ فایرفاکس + ضبط ویدیو (با محدودیت زمانی جدید) ═══════════════════════
 def get_firefox_browser():
     pw = sync_playwright().start()
     browser = pw.firefox.launch(
@@ -1329,6 +1450,15 @@ def handle_record_video(job):
     video_format = session.settings.video_format
     delivery = session.settings.video_delivery
     resolution = session.settings.video_resolution
+    audio_enabled = session.settings.audio_enabled
+
+    # محدودیت‌های جدید بر اساس دقیقه
+    MAX_REC_MINUTES = 60 if session.is_admin else 15
+    MAX_REC_SECONDS = MAX_REC_MINUTES * 60
+
+    if rec_time > MAX_REC_SECONDS:
+        send_message(chat_id, f"⛔ حداکثر زمان ضبط {MAX_REC_MINUTES} دقیقه می‌باشد.")
+        job.status = "cancelled"; update_job(job); return
 
     res_req = RES_REQUIREMENTS.get(resolution, [])
     if session.subscription not in res_req and not session.is_admin:
@@ -1345,9 +1475,10 @@ def handle_record_video(job):
     os.makedirs(job_dir, exist_ok=True)
 
     behavior_names = {"click": "کلیک هوشمند", "scroll": "اسکرول نرم", "live": "لایو کامند"}
-    send_message(chat_id, f"🎬 ضبط {rec_time} ثانیه ({behavior_names.get(behavior, behavior)}) با کیفیت {resolution}...")
+    send_message(chat_id, f"🎬 ضبط {rec_time//60} دقیقه و {rec_time%60} ثانیه ({behavior_names.get(behavior, behavior)}) با کیفیت {resolution}...")
 
     _rec_pw = None; _rec_browser = None
+    audio_proc = None; audio_path = None
     try:
         _rec_pw, _rec_browser = get_firefox_browser()
         context = _rec_browser.new_context(
@@ -1367,9 +1498,49 @@ def handle_record_video(job):
             page.mouse.click(vx, vy)
             try: page.evaluate("() => { const v = document.querySelector('video'); if (v) v.play(); }")
             except: pass
-            page.wait_for_timeout(rec_time * 1000)
+
+            # ضبط صدا با متد جدید (در صورت فعال بودن)
+            if audio_enabled:
+                try:
+                    subprocess.run(["pulseaudio", "-D", "--exit-idle-time=-1"], check=False,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    time.sleep(1)
+                    subprocess.run(["pactl", "load-module", "module-null-sink", "sink_name=virtual_out"], check=False)
+                    time.sleep(2)
+                    # تلاش برای هدایت صدای فایرفاکس
+                    sink_input = subprocess.run(
+                        "pactl list sink-inputs | grep -B 18 -i 'firefox' | grep 'Sink Input' | awk '{print $3}' | cut -d '#' -f 2",
+                        shell=True, capture_output=True, text=True
+                    ).stdout.strip()
+                    if sink_input:
+                        subprocess.run(["pactl", "move-sink-input", sink_input, "virtual_out"], check=False)
+                    # شروع ضبط صدا
+                    audio_path = os.path.join(job_dir, "audio.mp3")
+                    audio_proc = subprocess.Popen(
+                        ['ffmpeg', '-y', '-f', 'pulse', '-i', 'virtual_out.monitor',
+                         '-ac', '2', '-ar', '44100', '-acodec', 'libmp3lame', '-b:a', '128k', audio_path],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                    )
+                except Exception as e:
+                    safe_print(f"Audio setup failed: {e}")
+
+            # حلقهٔ ضبط با پشتیبانی از توقف زودهنگام
+            start_time = time.time()
+            while time.time() - start_time < rec_time:
+                if session.cancel_requested:
+                    send_message(chat_id, "⏹️ ضبط متوقف شد.")
+                    break
+                time.sleep(0.5)
+
         finally:
             page.close(); context.close()
+
+        # توقف ضبط صدا
+        if audio_proc:
+            try:
+                audio_proc.terminate()
+                audio_proc.wait(timeout=5)
+            except: pass
 
         webm = None
         for f in os.listdir(job_dir):
@@ -1416,6 +1587,9 @@ def handle_record_video(job):
         use_zip = (delivery == "zip")
         send_file(final_video_path, "🎬 ویدیو", use_zip)
 
+        if audio_path and os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
+            send_file(audio_path, "🎵 صوت", use_zip)
+
         job.status = "done"; update_job(job)
         debug_log(f"Recording done for job {job.job_id}")
 
@@ -1438,9 +1612,10 @@ def handle_interactive_scan(job):
     if not url:
         send_message(chat_id, "❌ صفحه‌ای برای کاوش باز نیست."); return
 
-    ctx = get_or_create_context(chat_id, session.settings.incognito_mode)
-    page = ctx.new_page()
+    pw = sync_playwright().start(); browser = None
     try:
+        browser = pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page()
         page.goto(url, timeout=60000, wait_until="domcontentloaded")
         page.wait_for_timeout(2000)
 
@@ -1485,6 +1660,7 @@ def handle_interactive_scan(job):
             return results;
         }""")
 
+        page.close()
         if not elements:
             send_message(chat_id, "🚫 هیچ فیلد متنی در این صفحه یافت نشد.")
             job.status = "done"; update_job(job); return
@@ -1511,7 +1687,8 @@ def handle_interactive_scan(job):
         send_message(chat_id, f"❌ خطا: {e}")
         job.status = "error"; update_job(job)
     finally:
-        page.close()
+        if browser: browser.close()
+        if pw: pw.stop()
 
 def handle_interactive_execute(job):
     chat_id = job.chat_id; session = get_session(chat_id)
@@ -1534,12 +1711,13 @@ def handle_interactive_execute(job):
         return
 
     send_message(chat_id, f"🔎 در حال جستجوی «{user_text}»...")
-    ctx = get_or_create_context(chat_id, session.settings.incognito_mode)
-    page = ctx.new_page()
+    pw = sync_playwright().start(); browser = None
     job_dir = os.path.join("jobs_data", job.job_id)
     os.makedirs(job_dir, exist_ok=True)
 
     try:
+        browser = pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page()
         page.goto(url, timeout=60000, wait_until="domcontentloaded")
         page.wait_for_timeout(2000)
 
@@ -1575,6 +1753,7 @@ def handle_interactive_execute(job):
         spath = os.path.join(job_dir, "interactive_result.png")
         page.screenshot(path=spath, full_page=True)
         send_document(chat_id, spath, caption=f"📸 نتیجه جستجوی «{user_text}»")
+        page.close()
 
         job.status = "done"; update_job(job)
 
@@ -1582,34 +1761,38 @@ def handle_interactive_execute(job):
         send_message(chat_id, f"❌ خطا: {e}")
         job.status = "error"; update_job(job)
     finally:
-        page.close()
+        if browser: browser.close()
+        if pw: pw.stop()
         shutil.rmtree(job_dir, ignore_errors=True)
 
 # ═══════════════════════ شات کامل ═══════════════════════
 def handle_fullpage_screenshot(job):
     chat_id = job.chat_id; session = get_session(chat_id)
-    ctx = get_or_create_context(chat_id, session.settings.incognito_mode)
-    page = ctx.new_page()
+    pw = sync_playwright().start(); browser = None
     job_dir = os.path.join("jobs_data", job.job_id)
     os.makedirs(job_dir, exist_ok=True)
 
     try:
         send_message(chat_id, "📸 در حال بارگذاری کامل صفحه...")
+        browser = pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page()
         page.goto(job.url, timeout=120000, wait_until="domcontentloaded")
         page.wait_for_timeout(5000)
         spath = os.path.join(job_dir, "fullpage.png")
         page.screenshot(path=spath, full_page=True)
         send_document(chat_id, spath, caption="✅ شات کامل (Full Page)")
+        page.close()
         job.status = "done"; update_job(job)
     except Exception as e:
         send_message(chat_id, f"❌ خطا: {e}")
         job.status = "error"; update_job(job)
     finally:
-        page.close()
+        if browser: browser.close()
+        if pw: pw.stop()
         shutil.rmtree(job_dir, ignore_errors=True)
 
-# ═══════════════════════ مرورگر و زیرمنوها ═══════════════════════
-def handle_browser(job, job_dir):
+# ═══════════════════════ مرورگر ═══════════════════════
+def handle_browser(job, job_dir, browser):
     chat_id = job.chat_id; session = get_session(chat_id)
     url = job.url
 
@@ -1619,9 +1802,7 @@ def handle_browser(job, job_dir):
         return
 
     mode = session.settings.browser_mode
-    incognito = session.settings.incognito_mode
-    ctx = get_or_create_context(chat_id, incognito)
-    page = ctx.new_page()
+    page = browser.new_page()
 
     parsed_url = urlparse(url)
     if parsed_url.netloc.lower() in (session.ad_blocked_domains or []):
@@ -1716,95 +1897,16 @@ def send_browser_page(chat_id, image_path=None, url="", page_num=0):
         session.text_links = cmds; set_session(session)
 
 # ═══════════════════════ اسکن و تحلیل ═══════════════════════
-def scan_videos_smart(page):
-    elements = page.evaluate("""() => {
-        const results = [];
-        const centerX = window.innerWidth / 2;
-        const centerY = window.innerHeight / 2;
-        document.querySelectorAll('video').forEach(v => {
-            const rect = v.getBoundingClientRect();
-            if (rect.width < 200 || rect.height < 150) return;
-            let src = v.src || (v.querySelector('source') ? v.querySelector('source').src : '');
-            if (!src) return;
-            const area = rect.width * rect.height;
-            const dist = Math.sqrt(Math.pow(rect.x + rect.width/2 - centerX, 2) + Math.pow(rect.y + rect.height/2 - centerY, 2));
-            results.push({text: 'video element', href: src, score: area - dist*2, w: rect.width, h: rect.height});
-        });
-        document.querySelectorAll('iframe').forEach(f => {
-            const rect = f.getBoundingClientRect();
-            if (rect.width < 300 || rect.height < 200) return;
-            let src = f.src || '';
-            if (!src.startsWith('http')) return;
-            const area = rect.width * rect.height;
-            const dist = Math.sqrt(Math.pow(rect.x + rect.width/2 - centerX, 2) + Math.pow(rect.y + rect.height/2 - centerY, 2));
-            results.push({text: 'iframe', href: src, score: area - dist*2, w: rect.width, h: rect.height});
-        });
-        return results;
-    }""")
-
-    network_urls = []
-    def capture(response):
-        ct = response.headers.get("content-type", "")
-        url = response.url.lower()
-        if "mpegurl" in ct or "dash+xml" in ct or url.endswith((".m3u8", ".mpd")) or \
-           ("video" in ct and (url.endswith(".mp4") or url.endswith(".webm") or url.endswith(".mkv"))):
-            network_urls.append(response.url)
-    page.on("response", capture)
-    page.wait_for_timeout(3000)
-    page.remove_listener("response", capture)
-
-    json_urls = page.evaluate("""() => {
-        const results = [];
-        const scripts = document.querySelectorAll('script');
-        for (const s of scripts) {
-            const text = s.textContent || '';
-            const matches = text.match(/(https?:\\/\\/[^"']+\\.(?:m3u8|mp4|mkv|webm|mpd)[^"']*)/gi);
-            if (matches) results.push(...matches);
-        }
-        return results;
-    }""")
-
-    all_candidates = []
-    for el in elements:
-        href = el["href"]
-        if not href.startswith("http"): continue
-        parsed = urlparse(href)
-        if any(ad in parsed.netloc for ad in AD_DOMAINS): continue
-        if any(kw in href.lower() for kw in BLOCKED_AD_KEYWORDS): continue
-        all_candidates.append({
-            "text": (el["text"] + f" ({parsed.netloc})")[:35],
-            "href": href,
-            "score": el["score"]
-        })
-    for url in network_urls:
-        if url in [c["href"] for c in all_candidates]: continue
-        parsed = urlparse(url)
-        if any(ad in parsed.netloc for ad in AD_DOMAINS): continue
-        all_candidates.append({
-            "text": f"Network stream ({parsed.netloc})"[:35],
-            "href": url,
-            "score": 100000
-        })
-    for url in json_urls:
-        if url in [c["href"] for c in all_candidates]: continue
-        parsed = urlparse(url)
-        if any(ad in parsed.netloc for ad in AD_DOMAINS): continue
-        all_candidates.append({
-            "text": f"JSON stream ({parsed.netloc})"[:35],
-            "href": url,
-            "score": 90000
-        })
-    all_candidates.sort(key=lambda x: x["score"], reverse=True)
-    return all_candidates
-
 def handle_scan_videos(job):
     chat_id = job.chat_id; session = get_session(chat_id)
-    ctx = get_or_create_context(chat_id, session.settings.incognito_mode)
-    page = ctx.new_page()
+    pw = sync_playwright().start(); browser = None
     try:
+        browser = pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page()
         page.goto(session.browser_url, timeout=60000, wait_until="domcontentloaded")
         page.wait_for_timeout(3000)
         videos = scan_videos_smart(page)
+        page.close()
         if not videos:
             send_message(chat_id, "🚫 هیچ ویدیویی یافت نشد.")
             job.status = "done"; update_job(job); return
@@ -1819,7 +1921,9 @@ def handle_scan_videos(job):
     except Exception as e:
         send_message(chat_id, f"❌ خطا: {e}")
         job.status = "error"; update_job(job)
-    finally: page.close()
+    finally:
+        if browser: browser.close()
+        if pw: pw.stop()
 
 def handle_smart_analyze(job):
     chat_id = job.chat_id; session = get_session(chat_id)
@@ -1854,12 +1958,14 @@ def handle_smart_analyze(job):
 
 def handle_source_analyze(job):
     chat_id = job.chat_id; session = get_session(chat_id)
-    ctx = get_or_create_context(chat_id, session.settings.incognito_mode)
-    page = ctx.new_page()
+    pw = sync_playwright().start(); browser = None
     try:
+        browser = pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page()
         page.goto(session.browser_url, timeout=60000, wait_until="domcontentloaded")
         page.wait_for_timeout(2000)
         html = page.content()
+        page.close()
         soup = BeautifulSoup(html, "html.parser")
         found_urls = set()
         for tag in soup.find_all(["a", "link", "script", "img", "iframe", "source", "video", "audio"]):
@@ -1889,7 +1995,9 @@ def handle_source_analyze(job):
     except Exception as e:
         send_message(chat_id, f"❌ خطا: {e}")
         job.status = "error"; update_job(job)
-    finally: page.close()
+    finally:
+        if browser: browser.close()
+        if pw: pw.stop()
 
 def handle_scan_downloads(job):
     chat_id = job.chat_id; session = get_session(chat_id)
@@ -1913,9 +2021,10 @@ def handle_scan_downloads(job):
         all_results.append({"name": fname[:35], "url": link, "size": size_str})
 
     start_time = time.time()
+    pw = sync_playwright().start(); browser = None
     try:
-        ctx = get_or_create_context(chat_id, session.settings.incognito_mode)
-        page = ctx.new_page()
+        browser = pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page()
         page.goto(url, timeout=30000, wait_until="domcontentloaded")
         page.wait_for_timeout(1000)
         all_hrefs = page.evaluate("""() => {
@@ -1931,6 +2040,9 @@ def handle_scan_downloads(job):
         elapsed = time.time() - start_time
         if all_results: send_message(chat_id, f"✅ مرحله ۱: {len(all_results)} فایل ({elapsed:.1f}s)")
     except Exception as e: safe_print(f"scan_downloads stage1 error: {e}")
+    finally:
+        if browser: browser.close()
+        if pw: pw.stop()
 
     if not all_results and time.time() - start_time < 60:
         send_message(chat_id, "🔄 مرحله ۲: کراول سبک...")
@@ -2095,6 +2207,19 @@ def handle_message(chat_id, text):
         if remaining > 0 or (chat_id in admin_bans and admin_bans[chat_id] == 9999999999):
             send_message(chat_id, "🚫 شما تحریم هستید.")
             return
+
+    if text == "/stop":
+        if not session.current_job_id:
+            send_message(chat_id, "⚠️ هیچ فرایندی برای توقف وجود ندارد.")
+            return
+        job = find_job(session.current_job_id)
+        if job and job.status == "running":
+            session.cancel_requested = True
+            set_session(session)
+            send_message(chat_id, "⏹️ درخواست توقف ثبت شد. به محض پایان مرحلهٔ جاری، فرایند متوقف خواهد شد.")
+        else:
+            send_message(chat_id, "⚠️ این فرایند قابلیت توقف ندارد یا پایان یافته است.")
+        return
 
     if text == "/kill":
         if not session.is_admin and session.subscription == "پایه":
@@ -2262,8 +2387,7 @@ def handle_message(chat_id, text):
         enqueue_job(job, qtype)
         session.state = "idle"; session.current_job_id = job.job_id
         set_session(session)
-        pos = job_queue_position(job.job_id, qtype)
-        send_message(chat_id, f"✅ در صف قرار گرفت (نوبت {pos})" if pos != 1 else "✅ در صف قرار گرفت.")
+        send_message(chat_id, "✅ در صف قرار گرفت.")
         return
 
     if session.state == "browsing" and session.text_links and text in session.text_links:
@@ -2298,9 +2422,10 @@ def handle_live_command(chat_id, text, url, need_scroll=False):
     if not session.browser_url:
         send_message(chat_id, "❌ مرورگری باز نیست.")
         return
-    ctx = get_or_create_context(chat_id, session.settings.incognito_mode)
-    page = ctx.new_page()
+    pw = sync_playwright().start(); browser = None
     try:
+        browser = pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page()
         page.goto(session.browser_url, timeout=60000, wait_until="domcontentloaded")
         page.wait_for_timeout(2000)
         page.evaluate(f"""() => {{
@@ -2317,7 +2442,8 @@ def handle_live_command(chat_id, text, url, need_scroll=False):
     except Exception as e:
         send_message(chat_id, f"❌ خطا در Live: {e}")
     finally:
-        page.close()
+        if browser: browser.close()
+        if pw: pw.stop()
 
 def handle_callback(cq):
     cid = cq["id"]; msg = cq.get("message"); data = cq.get("data", "")
@@ -2340,16 +2466,18 @@ def handle_callback(cq):
 
     if data == "menu_help":
         help_text = (
-            "📖 **راهنمای عمومی**\n\n"
+            "📖 **راهنمای ربات**\n\n"
             "🧭 **مرورگر:** لینک بده، صفحه رو ببین، لینک‌ها و ویدیوهاش رو استخراج کن.\n"
             "📸 **شات:** لینک بده، از صفحه عکس بگیر.\n"
             "📥 **دانلود:** لینک فایل مستقیم یا صفحه بده، برات دانلود کنه.\n"
             "🎬 **ضبط:** لینک صفحه بده، ازش فیلم بگیره.\n"
             "🔎 **کاوشگر:** (طلایی/الماسی) توی مرورگر سایت رو باز کن، فیلدهای متن رو پیدا کن و باهاشون جستجو کن.\n"
             "⚙️ **تنظیمات:** زمان ضبط، کیفیت، نحوه دانلود و ... رو تغییر بده.\n"
+            "⏹️ **/stop:** وسط ضبط یا دانلود، هرچی تا الان انجام شده رو ذخیره کن و متوقف شو.\n"
             "💡 برای تهیه اشتراک با @MrHadi3 تماس بگیر."
         )
-        send_message(chat_id, help_text)
+        kb = {"inline_keyboard": [[{"text": "🔙 بازگشت", "callback_data": "back_main"}]]}
+        send_message(chat_id, help_text, reply_markup=kb)
         return
 
     if data == "free_info":
@@ -2387,7 +2515,9 @@ def handle_callback(cq):
             return
         session.state = "waiting_url_record"; set_session(session); send_message(chat_id, "🎬 لینک:")
     elif data == "menu_settings":
-        result = send_message(chat_id, "⚙️ تنظیمات:", reply_markup=settings_keyboard(session.settings, session.subscription))
+        kb = settings_keyboard(session.settings, session.subscription)
+        msg = f"⚙️ **تنظیمات**\n\n⏱️ زمان ضبط (دقیقه): {session.settings.record_time//60}\n📥 دانلود: {'سریع' if session.settings.default_download_mode == 'stream' else 'عادی'}\n🌐 حالت: {session.settings.browser_mode}\n🎬 رفتار ضبط: {session.settings.record_behavior}\n🎞️ فرمت: {session.settings.video_format.upper()}\n📺 کیفیت: {session.settings.video_resolution}\n📦 ارسال: {session.settings.video_delivery}"
+        result = send_message(chat_id, msg, reply_markup=kb)
         if result and "message_id" in result:
             session.last_settings_msg_id = result["message_id"]; set_session(session)
     elif data == "menu_admin":
@@ -2396,7 +2526,6 @@ def handle_callback(cq):
     elif data == "menu_cancel" or data == "/cancel":
         session.state = "idle"; session.cancel_requested = True; session.current_job_id = None
         session.click_counter = 0; set_session(session)
-        close_user_context(chat_id)
         send_message(chat_id, "✅ لغو شد.", reply_markup=main_menu_keyboard(session.is_admin))
     elif data == "admin_toggleservice":
         if session.is_admin:
@@ -2409,11 +2538,11 @@ def handle_callback(cq):
         if session.is_admin: list_users(chat_id)
         else: answer_callback_query(cid, "دسترسی غیرمجاز")
 
-    elif data in ("set_dlmode", "set_brwmode", "set_deep", "set_recbeh", "set_vfmt", "set_incognito", "set_viddel", "set_resolution"):
+    elif data in ("set_dlmode", "set_brwmode", "set_deep", "set_recbeh", "set_vfmt", "set_incognito", "set_viddel", "set_resolution", "set_audio"):
         _settings_toggle(chat_id, session, data, cid)
     elif data == "set_rec":
         session.state = "waiting_record_time"; set_session(session);
-        send_message(chat_id, "⏱️ زمان ضبط (۱ تا ۱۸۰۰ ثانیه):")
+        send_message(chat_id, "⏱️ زمان ضبط را به **دقیقه** وارد کنید (۱ تا ۶۰ برای ادمین، ۱ تا ۱۵ برای کاربران عادی):")
     elif data == "back_main":
         send_message(chat_id, "منوی اصلی:", reply_markup=main_menu_keyboard(session.is_admin))
 
@@ -2528,7 +2657,7 @@ def handle_callback(cq):
         send_browser_page(chat_id, page_num=session.browser_page)
 
     elif data.startswith("closebrowser_"):
-        close_user_context(chat_id); session.state = "idle"; session.click_counter = 0; set_session(session)
+        session.state = "idle"; session.click_counter = 0; set_session(session)
         send_message(chat_id, "🧭 بسته شد.", reply_markup=main_menu_keyboard(session.is_admin))
 
     else:
@@ -2543,12 +2672,16 @@ def _settings_toggle(chat_id, session, data, cid):
     elif data == "set_incognito": session.settings.incognito_mode = not session.settings.incognito_mode
     elif data == "set_viddel": session.settings.video_delivery = "zip" if session.settings.video_delivery == "split" else "split"
     elif data == "set_resolution": resolutions = ["480p", "720p", "1080p", "4k"]; idx = resolutions.index(session.settings.video_resolution) if session.settings.video_resolution in resolutions else 1; session.settings.video_resolution = resolutions[(idx+1)%len(resolutions)]
+    elif data == "set_audio": session.settings.audio_enabled = not session.settings.audio_enabled
     set_session(session)
     answer_callback_query(cid, "✅ تنظیم شد.")
     if session.last_settings_msg_id:
-        edit_message_reply_markup(chat_id, session.last_settings_msg_id, settings_keyboard(session.settings, session.subscription))
+        kb = settings_keyboard(session.settings, session.subscription)
+        edit_message_reply_markup(chat_id, session.last_settings_msg_id, kb)
     else:
-        send_message(chat_id, "⚙️ تنظیمات:", reply_markup=settings_keyboard(session.settings, session.subscription))
+        kb = settings_keyboard(session.settings, session.subscription)
+        msg = f"⚙️ **تنظیمات**\n\n⏱️ زمان ضبط (دقیقه): {session.settings.record_time//60}\n📥 دانلود: {'سریع' if session.settings.default_download_mode == 'stream' else 'عادی'}\n🌐 حالت: {session.settings.browser_mode}\n🎬 رفتار ضبط: {session.settings.record_behavior}\n🎞️ فرمت: {session.settings.video_format.upper()}\n📺 کیفیت: {session.settings.video_resolution}\n📦 ارسال: {session.settings.video_delivery}"
+        send_message(chat_id, msg, reply_markup=kb)
 
 # ═══════════════════════ حلقه اصلی و Polling ═══════════════════════
 def polling_loop(stop_event):
@@ -2579,7 +2712,7 @@ def main():
     admin_bans = load_bans()
     stop_event = threading.Event()
 
-    # دو Worker برای هر صف (با timeout ضد قفل)
+    # دو Worker برای هر صف
     for i in range(2):
         threading.Thread(target=worker_loop, args=(i, stop_event, "browser"), daemon=True).start()
     for i in range(2):
@@ -2587,9 +2720,8 @@ def main():
     for i in range(2):
         threading.Thread(target=worker_loop, args=(i+4, stop_event, "record"), daemon=True).start()
 
-    # Polling
     threading.Thread(target=polling_loop, args=(stop_event,), daemon=True).start()
-    safe_print("✅ Bot25 Crash‑Proof اجرا شد")
+    safe_print("✅ Bot27 اجرا شد")
     try:
         while True: time.sleep(1)
     except KeyboardInterrupt: stop_event.set()
