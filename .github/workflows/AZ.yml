@@ -1,14 +1,14 @@
-name: AzadKonnande - قفل‌گشا
+name: AzadKonnande - آزادسازی خودکارUU
 
 on:
-  workflow_dispatch:          # فقط دستی اجرا شود
+  workflow_dispatch:          # فقط با کلیک شما اجرا می‌شود
 
 jobs:
   unlock:
     runs-on: ubuntu-latest
-    timeout-minutes: 5        # حداکثر ۵ دقیقه کافی است
+    timeout-minutes: 1
     env:
-      BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}   # توکن ربات اصلی که آزادکننده روی آن اجرا می‌شود
+      TARGET_BOT_TOKENS: ${{ secrets.TARGET_BOT_TOKENS }}   # توکن‌های ربات‌های مقصد (با کاما جدا شوند)
     steps:
       - name: دریافت کد
         uses: actions/checkout@v4
