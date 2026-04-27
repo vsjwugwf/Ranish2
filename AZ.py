@@ -8,7 +8,7 @@ import os, sys, json, time, threading, requests
 from typing import List
 
 # ═══════════ تنظیمات ═══════════
-MAIN_BOT_TOKEN = os.getenv("BALE_BOT_TOKEN", "").strip()
+MAIN_BOT_TOKEN = os.getenv("BALE_BOT_TOKEN1", "").strip()
 if not MAIN_BOT_TOKEN:
     print("ERROR: BALE_BOT_TOKEN not set", file=sys.stderr)
     sys.exit(1)
