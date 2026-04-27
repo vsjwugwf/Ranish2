@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Bot27 – نسخه نهایی کامل و پایدار (بدون حالت Live)
+Bot27 – نسخهٔ نهایی پایدار (Race‑Condition‑Proof)
 """
 
 import os, sys, json, time, math, queue, shutil, zipfile, uuid, re, hashlib
@@ -30,7 +30,7 @@ ADMIN_CHAT_ID = 46829437
 CODES_BACKUP_FILE = "codes_backup.json"
 BANS_FILE = "bans.json"
 
-WORKER_TIMEOUT = 300                     # ۵ دقیقه
+WORKER_TIMEOUT = 300                     # 5 دقیقه
 MAX_RECORD_MINUTES_ADMIN = 60
 MAX_RECORD_MINUTES_USER = 15
 MAX_4K_RECORD_MINUTES = 10
@@ -82,7 +82,7 @@ RES_REQUIREMENTS = {
     "4k": ["الماسی"],
 }
 
-# دامنه‌های تبلیغاتی پیش‌فرض
+# دامنه‌ها و کلمات کلیدی تبلیغاتی
 AD_DOMAINS = {"doubleclick.net", "googleadservices.com", "googlesyndication.com", "adservice.google.com"}
 BLOCKED_AD_KEYWORDS = {"ad", "banner", "popup", "sponsor", "track", "analytics"}
 
@@ -94,6 +94,13 @@ flood_lock = threading.Lock()
 user_flood_data: Dict[int, List[float]] = {}
 user_ban_until: Dict[int, float] = {}
 admin_bans: Dict[int, float] = {}
+
+# 📌 قفل‌های اختصاصی برای هر صف (رفع Race Condition)
+queue_locks = {
+    "browser": threading.Lock(),
+    "download": threading.Lock(),
+    "record": threading.Lock()
+}
 
 QUEUE_FILES = {
     "browser": "browser_queue.json",
@@ -643,44 +650,50 @@ def screenshot_4k(browser, url, out):
     finally:
         page.close()
 
-# ═══════════════ صف‌ها ═══════════════
+# ═══════════════ صف‌ها (نسخهٔ امن با قفل) ═══════════════
 def load_queue(queue_type: str) -> list:
-    try:
-        with open(QUEUE_FILES[queue_type], "r") as f:
-            return json.load(f)
-    except:
-        return []
+    with queue_locks[queue_type]:
+        try:
+            with open(QUEUE_FILES[queue_type], "r") as f:
+                return json.load(f)
+        except:
+            return []
 
 def save_queue(queue_type: str, data: list):
-    with open(QUEUE_FILES[queue_type] + ".tmp", "w") as f:
-        json.dump(data, f)
-    os.replace(QUEUE_FILES[queue_type] + ".tmp", QUEUE_FILES[queue_type])
+    with queue_locks[queue_type]:
+        tmp = QUEUE_FILES[queue_type] + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, QUEUE_FILES[queue_type])
 
 def enqueue_job(job: Job, queue_type: str):
-    q = load_queue(queue_type)
-    q.append(asdict(job))
-    save_queue(queue_type, q)
+    with queue_locks[queue_type]:
+        q = load_queue(queue_type)
+        q.append(asdict(job))
+        save_queue(queue_type, q)
 
 def dequeue_job(queue_type: str) -> Optional[Job]:
-    q = load_queue(queue_type)
-    for i, item in enumerate(q):
-        if item["status"] == "queued":
-            item["status"] = "running"
-            item["updated_at"] = time.time()
-            item["started_at"] = time.time()
-            save_queue(queue_type, q)
-            return Job(**item)
+    with queue_locks[queue_type]:
+        q = load_queue(queue_type)
+        for i, item in enumerate(q):
+            if item["status"] == "queued":
+                item["status"] = "running"
+                item["updated_at"] = time.time()
+                item["started_at"] = time.time()
+                save_queue(queue_type, q)
+                return Job(**item)
     return None
 
 def update_job(job: Job):
-    q = load_queue(job.queue_type)
-    for i, item in enumerate(q):
-        if item["job_id"] == job.job_id:
-            q[i] = asdict(job)
-            save_queue(job.queue_type, q)
-            return
-    q.append(asdict(job))
-    save_queue(job.queue_type, q)
+    with queue_locks[job.queue_type]:
+        q = load_queue(job.queue_type)
+        for i, item in enumerate(q):
+            if item["job_id"] == job.job_id:
+                q[i] = asdict(job)
+                save_queue(job.queue_type, q)
+                return
+        q.append(asdict(job))
+        save_queue(job.queue_type, q)
 
 def find_job(jid: str) -> Optional[Job]:
     for qt in ["browser", "download", "record"]:
@@ -701,21 +714,23 @@ def count_user_jobs(chat_id: int):
 
 def kill_all_user_jobs(chat_id: int):
     for qt in ["browser", "download", "record"]:
-        q = load_queue(qt)
-        for item in q:
-            if item["chat_id"] == chat_id and item["status"] in ("queued", "running"):
-                item["status"] = "cancelled"
-                item["updated_at"] = time.time()
-        save_queue(qt, q)
+        with queue_locks[qt]:
+            q = load_queue(qt)
+            for item in q:
+                if item["chat_id"] == chat_id and item["status"] in ("queued", "running"):
+                    item["status"] = "cancelled"
+                    item["updated_at"] = time.time()
+            save_queue(qt, q)
 
 def kill_all_jobs():
     for qt in ["browser", "download", "record"]:
-        q = load_queue(qt)
-        for item in q:
-            if item["status"] in ("queued", "running"):
-                item["status"] = "cancelled"
-                item["updated_at"] = time.time()
-        save_queue(qt, q)
+        with queue_locks[qt]:
+            q = load_queue(qt)
+            for item in q:
+                if item["status"] in ("queued", "running"):
+                    item["status"] = "cancelled"
+                    item["updated_at"] = time.time()
+            save_queue(qt, q)
 
 def close_user_context(chat_id):
     kill_all_user_jobs(chat_id)
@@ -917,9 +932,9 @@ def find_video_center(page):
     }""")
     return coords["x"], coords["y"]
 
-# ═══════════════ ادامه فایل (پردازش Jobها، ضبط، مرورگر، کاوشگر، پیام‌ها، callbackها) ═══════════════
-# کلیه توابع زیر مطابق نسخه قبلی با حذف کامل حالت Live
-
+# ═══════════════ ادامه در پارت دوم... ═══════════════
+# (توابع اصلی پردازش Jobها، مرورگر، ضبط، دانلود، اسکن، کاوشگر،
+#  مدیریت پیام و callbackها، پنل ادمین و حلقه‌های اصلی)
 # ═══════════════ پردازش Jobهای مرورگر ═══════════════
 def process_browser_job(job: Job):
     chat_id = job.chat_id
@@ -2473,7 +2488,6 @@ def handle_callback(cq):
     elif data.startswith("srcan_"):
         enqueue_job(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="source_analyze", url="", queue_type="browser"), "browser")
     elif data.startswith("recvid_"):
-        # ضبط از مرورگر – رفتار فقط click/scroll است
         if session.browser_url:
             if session.is_admin or count_user_jobs(chat_id) < 2:
                 enqueue_job(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="record_video", url=session.browser_url, queue_type="record"), "record")
