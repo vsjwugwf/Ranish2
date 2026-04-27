@@ -1,0 +1,22 @@
+name: AzadKonnande - قفل‌گشا
+
+on:
+  workflow_dispatch:          # فقط دستی اجرا شود
+
+jobs:
+  unlock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5        # حداکثر ۵ دقیقه کافی است
+    env:
+      BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}   # توکن ربات اصلی که آزادکننده روی آن اجرا می‌شود
+    steps:
+      - name: دریافت کد
+        uses: actions/checkout@v4
+
+      - name: نصب پایتون
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: اجرای آزادکننده
+        run: python AZ.py
